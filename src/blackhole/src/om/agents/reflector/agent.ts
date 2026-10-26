@@ -148,7 +148,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
   // closing batch — but a close from a run that recorded nothing at all still
   // throws, so a failing provider cannot turn each review into a silent skip.
   let closedByCompleteBatch = false;
-  const recordReflections: AgentTool<typeof RecordReflectionsSchema> = {
+  const recordReflections: AgentTool<any> = {
     name: "record_reflections",
     label: "Record reflections",
     description:
@@ -160,7 +160,10 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       // emits a batch the host rejects and burns turns on it.
       "May not be empty: when nothing is stable enough, do not call the tool and reply briefly instead.",
     parameters: RecordReflectionsSchema,
-    execute: async (_id, params: RecordReflectionsArgs) => {
+    execute: async (_id, rawParams) => {
+      // pi-ai's validateToolArguments already checked the raw arguments against
+      // the plain schema on this definition; bind the typed shape here.
+      const params = rawParams as RecordReflectionsArgs;
       let added = 0;
       let duplicates = 0;
       let rejected = 0;
@@ -253,7 +256,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
       timestamp: Date.now(),
 },
   ];
-  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections as AgentTool<any>]);
+  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections]);
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

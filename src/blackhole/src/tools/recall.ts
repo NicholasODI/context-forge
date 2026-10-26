@@ -4,8 +4,6 @@
  *
  * Created by pi-vcc-om. Replaces pi-vcc's vcc_recall and OM's standalone recall-observation.
  */
-import { Type } from "typebox";
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadAllMessages } from "../core/load-messages";
 import { clip } from "../core/content";
@@ -86,14 +84,16 @@ export function mergeExpandedIntoSearchResults(
   return merged;
 }
 
+export interface RecallArgs {
+  query?: string;
+  expand?: number[];
+  page?: number;
+  scope?: "lineage" | "all";
+  mode?: string;
+}
+
 async function vccRecall(
-  params: {
-    query?: string;
-    expand?: number[];
-    page?: number;
-    scope?: "lineage" | "all";
-    mode?: string;
-  },
+  params: RecallArgs,
   ctx: any,
   maxChars = DEFAULT_RECALL_RESPONSE_MAX_CHARS,
 ) {
@@ -425,37 +425,46 @@ export function registerRecallTool(
       "Use recall — literal text/regex search across session history and file write/edit content. #N expands an entry; #N:path with optional :offset:limit or :full drills down into file content; #N:text pages a message body; 12-char hex ids recover observation/reflection sources. mode:file for file-content-only, mode:touched for aggregated files-by-path. scope:'all' to search the full session. If no results, try fewer terms or a regex pattern.",
       "Use recall — when a drill-down path matches multiple files, options are listed. Narrow with a more specific path substring. Only full-file writes are indexed for text search (edit diffs are not).",
     ],
-    parameters: Type.Object({
-      query: Type.Optional(
-        Type.String({
+    // Plain JSON Schema on purpose, not typebox (see src/om/agents/*/tool-schema.ts):
+    // pi-ai consumes parameters as plain JSON (toToolDeclaration round-trips it
+    // through JSON.parse(JSON.stringify(...)), validateToolArguments has a
+    // plain-schema branch), and typebox's Type.Object evaluated to a function under
+    // the extension worker's virtual-module loader, making that round-trip throw at
+    // declaration time.
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
           description:
             "Text/regex search; #N expands entry; #N:path drills file (#N:file auto-selects); #N:text pages a message body; #N:path:full all lines; #N:path:offset:limit range; 12-char hex for observations. Only full-file writes indexed.",
-        }),
-      ),
-      expand: Type.Optional(
-        Type.Array(Type.Number(), {
-          description:
-            "Entry indices to return full untruncated content for. Standalone or with query.",
-        }),
-      ),
-      page: Type.Optional(
-        Type.Number({
+        },
+        expand: {
+          type: "array",
+          items: { type: "number" },
+          description: "Entry indices to return full untruncated content for. Standalone or with query.",
+        },
+        page: {
+          type: "number",
           description: "Page number (1-based) for paginated results. Default: 1.",
-        }),
-      ),
-      scope: Type.Optional(
-        StringEnum(["lineage", "all"] as const, {
+        },
+        scope: {
+          type: "string",
+          enum: ["lineage", "all"],
           description: "Search scope. lineage = active lineage (default), all = entire session.",
-        }),
-      ),
-      mode: Type.Optional(
-        StringEnum(["hybrid", "file", "touched"] as const, {
+        },
+        mode: {
+          type: "string",
+          enum: ["hybrid", "file", "touched"],
           description:
             "What content to search. hybrid (default) = all session content. file = file content only. touched = files-by-path summary with entry indices.",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        },
+      },
+    },
+    async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
+      // pi-ai's validateToolArguments already checked the raw arguments against
+      // the plain schema on this definition; bind the typed shape here.
+      const args = rawParams as unknown as RecallArgs;
       const maxChars = resolveMaxChars();
       const sessionFile = ctx.sessionManager.getSessionFile();
       if (!sessionFile) {
@@ -465,7 +474,7 @@ export function registerRecallTool(
         };
       }
 
-      const scope = normalizeRecallScope(params.scope);
+      const scope = normalizeRecallScope(args.scope);
       const lineageEntryIds =
         scope === "lineage" ? getActiveLineageEntryIds(ctx.sessionManager) : undefined;
 
@@ -475,7 +484,7 @@ export function registerRecallTool(
       // the active lineage unless scope:'all'. Membership is checked against
       // global indices; expandEntryFile keeps loading unfiltered so #N stays
       // aligned with the global message index.
-      const q = params.query?.trim();
+      const q = args.query?.trim();
       if (q && parseDrillDown(q)) {
         const parsed = parseDrillDown(q)!;
         if (lineageEntryIds) {
@@ -524,7 +533,7 @@ export function registerRecallTool(
         return omRecall(q, ctx, maxChars);
       }
       // Default: pi-vcc search
-      return vccRecall(params, ctx, maxChars);
+      return vccRecall(args, ctx, maxChars);
     },
   });
 }

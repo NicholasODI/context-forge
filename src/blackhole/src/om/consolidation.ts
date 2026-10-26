@@ -10,7 +10,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesSkippedProvider } from "../core/provider-skip.js";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { ConfiguredModel } from "./config.js";
+import { type Config, type ConfiguredModel } from "./config.js";
 import { debugLog, withDebugLogContext } from "./debug-log.js";
 import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runtime.js";
 import { withProviderAttributionHeaders } from "./provider-stream.js";
@@ -343,6 +343,33 @@ function matchesEmptyPressurePool(runtime: Runtime, poolSignature: string): bool
   const cursor = runtime.cursors?.dropper;
   return cursor?.state === "empty" && cursor.activePoolSignature === poolSignature;
 }
+/**
+ * Accumulated source tokens since valid reflection coverage — the single
+ * progress measure shared by the scheduler (`anyStageDue`) and the stage
+ * gate (`runReflectorStage`). Automatic mode anchors on the
+ * `OM_REFLECTIONS_RECORDED` coverage marker in the branch; manual mode
+ * anchors on the pending reflection's `coversUpToId`, falling back to
+ * observation coverage when no reflection has been pending yet.
+ *
+ * Crucially this does NOT use the pipeline cursor: a below-threshold or
+ * skipped check must not move the accumulation anchor (the cursor is a
+ * processing-position record, not a coverage claim).
+ */
+export function reflectionAccumulatedTokens(
+  entries: Entry[],
+  config: Config,
+  pending?: PendingOMState,
+): number {
+  if (isManualMode(config)) {
+    if (pending?.reflection?.coversUpToId) {
+      const idx = entryIndexForId(entries, pending.reflection.coversUpToId);
+      if (idx >= 0) return rawTokensAfterIndex(entries, idx);
+      // Coverage point gone (fork/compaction): fall back to observation coverage.
+    }
+    return rawTokensSinceObservationCoverage(entries);
+  }
+  return rawTokensSinceReflectionCoverage(entries);
+}
 
 /** Cursor-aware stage-due check.  Uses cursors when available; falls back to
  *  legacy coverage markers when cursors are absent (cold start, fork recovery).
@@ -367,46 +394,40 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
   })();
 
   // ── Reflector ─────────────────────────────────────────────────────────
+  // Token accumulation anchors on valid reflection coverage (see
+  // reflectionAccumulatedTokens), never on the cursor: a persisted not_due/
+  // skipped cursor must not reset or perpetuate a lost accumulation anchor.
   const reflectorDue = (() => {
-    const cursor = cursors.reflector;
-    if (!cursor) {
-      return rawTokensSinceReflectionCoverage(entries) >= config.reflectAfterTokens;
-    }
-    const idx = entryIndexForId(entries, cursor.entryId);
-    if (idx < 0) {
-      return rawTokensSinceReflectionCoverage(entries) >= config.reflectAfterTokens;
-    }
-    // Must have enough accumulated tokens before considering reflector
-    const tokensSince = rawTokensAfterIndex(entries, idx);
-    if (tokensSince < config.reflectAfterTokens) {
+    if (reflectionAccumulatedTokens(entries, config, pending) < config.reflectAfterTokens) {
       return false;
     }
-    // Check for new observation batches after the cursor
-    for (let i = idx + 1; i < entries.length; i++) {
+    // Above threshold: due when unprocessed observations exist beyond valid
+    // reflection coverage. The coverage marker — not the cursor — is the
+    // anchor, so a broken persisted cursor cannot hide earlier observations.
+    const coverageId = isManualMode(config)
+      ? pending?.reflection?.coversUpToId
+      : latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
+    if (!coverageId) return true; // no prior reflection → any observations are unprocessed
+    const covIdx = entryIndexForId(entries, coverageId);
+    if (covIdx < 0) return true; // coverage point gone → treat as unprocessed
+    for (let i = covIdx + 1; i < entries.length; i++) {
       const e = entries[i];
       if (e.type === "custom" && e.customType === OM_OBSERVATIONS_RECORDED) {
-        // Skip if this marker's coversUpToId is at or before the cursor
-        // — data it covers was already processed.
-        const markerCoversUpTo: string | undefined = (e as any).data?.coversUpToId;
-        if (markerCoversUpTo) {
-          const markerCoversIdx = entryIndexForId(entries, markerCoversUpTo);
-          if (markerCoversIdx >= 0 && markerCoversIdx <= idx) continue;
-        }
-        return true;
+        const obs = (e.data as any)?.observations;
+        if (Array.isArray(obs) && obs.length > 0) return true;
       }
     }
-    // In manual mode, also check pending observation batches that arrived
-    // after the cursor (since branch has no OM markers). Unanchored batches
-    // are deliberately not a trigger: they carry no coverage point, so a
-    // review of them alone could not be committed — they ride along on the
-    // next recorded run's input instead (see pendingObservationsCreatedAfter).
-    if (pending) {
-      const pendingBatches = pending.observationBatches ?? [];
+    // Manual mode: pending observation batches beyond the reflection coverage
+    // are unprocessed. Unanchored batches are deliberately not a trigger:
+    // they carry no coverage point, so a review of them alone could not be
+    // committed — they ride along on the next recorded run's input instead.
+    if (isManualMode(config)) {
+      const pendingBatches = pending?.observationBatches ?? [];
       for (const batch of pendingBatches) {
-        if (batch.coversUpToId) {
-          const batchIdx = entryIndexForId(entries, batch.coversUpToId);
-          if (batchIdx >= 0 && batchIdx > idx) return true;
-        }
+        if (!(batch.data as any)?.observations?.length) continue;
+        if (!batch.coversUpToId) continue; // unanchored
+        const batchIdx = entryIndexForId(entries, batch.coversUpToId);
+        if (batchIdx < 0 || batchIdx > covIdx) return true;
       }
     }
     return false;
@@ -457,9 +478,11 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
           if (idx < 0) {
             return rawTokensSinceDropCoverage(entries) >= config.reflectAfterTokens;
           }
-          // Must have enough accumulated tokens before considering dropper
-          const tokensSince = rawTokensAfterIndex(entries, idx);
-          if (tokensSince < config.reflectAfterTokens) {
+          // Token accumulation anchors on valid drop coverage (see
+          // rawTokensSinceDropCoverage), never on the cursor: a persisted
+          // not_due cursor must not reset the accumulation anchor, matching
+          // runDropperStage's own gate.
+          if (rawTokensSinceDropCoverage(entries) < config.reflectAfterTokens) {
             return false;
           }
           for (let i = idx + 1; i < entries.length; i++) {
@@ -586,21 +609,55 @@ function currentSessionIdentity(ctx: ConsolidationCtx): string | undefined {
   return ctx.sessionManager.getSessionId?.();
 }
 
-export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime): void {
+export function registerConsolidationTrigger(
+  pi: ExtensionAPI,
+  runtime: Runtime,
+  gates: { readonly observationalMemory: boolean; readonly vccCompaction: boolean },
+): void {
+  // Registration beacon: fires the instant this instance attaches its memory
+  // callbacks. The core emits session_start/agent_start/turn_end OUTSIDE any
+  // withDebugLogContext, so this is force-on (independent of ALS) — otherwise a
+  // live registration could look absent in the log. Carries the
+  // observationalMemory gate (what actually controls memory triggers) and
+  // vccCompaction (a separate gate, NOT required for memory) for correlation.
+  // The gates come from the host registration, NOT runtime.config: the OM
+  // UnifiedConfig has no observationalMemory/vccCompaction fields (those are
+  // extension-level host gates), so reading them off runtime.config would
+  // always log false in production.
+  debugLog(
+    "consolidation.trigger_registered",
+    {
+      instanceId: runtime.instanceId,
+      observationalMemory: gates.observationalMemory,
+      vccCompaction: gates.vccCompaction,
+    },
+    true,
+  );
   pi.on("session_start", (_event, ctx) => {
-    runtime.startSession(currentSessionIdentity(ctx as ConsolidationCtx));
+    const sessionId = currentSessionIdentity(ctx as ConsolidationCtx);
+    // Force-on: binds the session identity for this instance independent of
+    // ALS, so we can correlate registration → session start → triggers.
+    debugLog("consolidation.session_start", { sessionId: sessionId ?? null, instanceId: runtime.instanceId }, true);
+    runtime.startSession(sessionId);
   });
   pi.on("session_shutdown", () => {
+    debugLog("consolidation.session_shutdown", { instanceId: runtime.instanceId }, true);
     runtime.dispose();
   });
-  const launch = (_event: unknown, ctx: ConsolidationCtx) => {
-    maybeLaunchConsolidation(pi, runtime, ctx);
-  };
+  const makeLaunch =
+    (source: "agent_start" | "turn_end") =>
+    (_event: unknown, ctx: ConsolidationCtx) => {
+      // First-line beacon, force-on and ALS-independent: the single event that
+      // distinguishes "callback ran" from "callback never ran" before any gate
+      // (and before ensureConfig loads the debug flag) can drop it.
+      debugLog("consolidation.trigger", { source, instanceId: runtime.instanceId, cwd: ctx.cwd }, true);
+      maybeLaunchConsolidation(pi, runtime, ctx);
+    };
   // The per-run notice collection resets in index.ts's agent_start handler,
   // which registers before both triggers — keep it there, not here, so the
   // reset never depends on trigger registration order.
-  pi.on("agent_start", launch);
-  pi.on("turn_end", launch);
+  pi.on("agent_start", makeLaunch("agent_start"));
+  pi.on("turn_end", makeLaunch("turn_end"));
 }
 
 /** Validate cursors against the current branch.  If a cursor's entry ID no longer
@@ -640,50 +697,92 @@ function validateCursors(entries: Entry[], runtime: Runtime): void {
   }
 }
 
-function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+/** Outcome of a guarded consolidation launch attempt. */
+export type ConsolidationLaunchResult =
+  | { outcome: "launched"; runId: string }
+  | { outcome: "skipped"; reason: string };
+
+/**
+ * Shared proactive-entry for consolidation launches. Both the automatic
+ * triggers and the manual command route through here: ensureConfig first
+ * (so the debug flag is set before anything is logged), then the ALS
+ * context — the core dispatches agent_start/turn_end AND command handlers
+ * OUTSIDE any withDebugLogContext, so without it the scheduling diagnostics
+ * below (consolidation.enter, every skip reason, cursor.loaded, due-check)
+ * resolved enabled() === false and were silently dropped — a live pipeline
+ * read as dead in the log.
+ */
+function withLaunchContext<T>(
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  fn: () => T,
+): T {
   runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
+  return withDebugLogContext({ enabled: runtime.config.debugLog === true, cwd: ctx.cwd }, fn);
+}
+
+function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
+  withLaunchContext(runtime, ctx, () => {
+    maybeLaunchConsolidationInternal(pi, runtime, ctx, "trigger");
+  });
+}
+
+/**
+ * Manual launch entry point (e.g. the /blackhole-consolidate command).
+ * Runs the exact same guarded scheduling body as the automatic triggers —
+ * config gates, in-flight single-flight, retry gate, cursor loading and
+ * validation, generation capture — and returns the outcome so the caller
+ * can report a launch or the skip reason.
+ */
+export function triggerConsolidation(
+  pi: ExtensionAPI,
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+): ConsolidationLaunchResult {
+  return withLaunchContext(runtime, ctx, () =>
+    maybeLaunchConsolidationInternal(pi, runtime, ctx, "manual"),
+  );
+}
+
+function skip(reason: string): ConsolidationLaunchResult {
+  debugLog("consolidation.skip", { reason });
+  return { outcome: "skipped", reason };
+}
+
+function maybeLaunchConsolidationInternal(
+  pi: ExtensionAPI,
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  source: "trigger" | "manual",
+): ConsolidationLaunchResult {
   debugLog("consolidation.enter", {
+    source,
     memory: runtime.config.memory,
     model: ctx.model ? `${(ctx.model as { provider?: string }).provider ?? "?"}` : "undefined",
     consolidationInFlight: runtime.consolidationInFlight,
     retryGated: runtime.isConsolidationRetryGated(),
   });
-  if (runtime.config.memory === false) {
-    debugLog("consolidation.skip", { reason: "memory_false" });
-    return;
-  }
+  if (runtime.config.memory === false) return skip("memory_false");
 
   // Provider-aware skip: another engine owns this provider (e.g. Codex native
   // compaction); blackhole also steps aside from observational-memory
   // consolidation so it never touches opaque checkpoints.
   // EXPERIMENTAL compat shim — do not extend; see src/core/provider-skip.ts.
-  if (matchesSkippedProvider(runtime.config, ctx.model)) {
-    debugLog("consolidation.skip", { reason: "provider_skip" });
-    return;
-  }
+  if (matchesSkippedProvider(runtime.config, ctx.model)) return skip("provider_skip");
 
   // LEGACY: passive check — only applies when new keys are absent (unmigrated config)
   if (runtime.config.compaction === undefined && runtime.config.compactionEngine === undefined) {
-    if (runtime.config.passive === true) {
-      debugLog("consolidation.skip", { reason: "legacy_passive" });
-      return;
-    }
+    if (runtime.config.passive === true) return skip("legacy_passive");
   }
-  if (runtime.consolidationInFlight) {
-    debugLog("consolidation.skip", { reason: "in_flight" });
-    return;
-  }
-  if (runtime.isConsolidationRetryGated()) {
-    debugLog("consolidation.skip", { reason: "retry_gated" });
-    return;
-  }
+  if (runtime.consolidationInFlight) return skip("in_flight");
+  if (runtime.isConsolidationRetryGated()) return skip("retry_gated");
 
   // Load and validate cursors from pending file (once per session; re-load on fork)
   let sessionId: string;
   try {
     sessionId = ctx.sessionManager.getSessionId();
   } catch (error) {
-    if (isStaleExtensionContextError(error)) return;
+    if (isStaleExtensionContextError(error)) return skip("stale_ctx");
     throw error;
   }
   if (runtime.cursorsLoadedSessionId !== sessionId) {
@@ -694,7 +793,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
     try {
       entries = ctx.sessionManager.getBranch() as Entry[];
     } catch (error) {
-      if (isStaleExtensionContextError(error)) return;
+      if (isStaleExtensionContextError(error)) return skip("stale_ctx");
       throw error;
     }
     validateCursors(entries, runtime);
@@ -711,7 +810,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
   try {
     entries = ctx.sessionManager.getBranch() as Entry[];
   } catch (error) {
-    if (isStaleExtensionContextError(error)) return;
+    if (isStaleExtensionContextError(error)) return skip("stale_ctx");
     throw error;
   }
   // In manual mode, the branch has no OM markers — pending state provides
@@ -723,15 +822,12 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
     entryCount: entries.length,
     totalTokens: rawTokensSinceObservationCoverage(entries),
   });
-  if (!stageDue) {
-    debugLog("consolidation.skip", { reason: "no_stage_due" });
-    return;
-  }
+  if (!stageDue) return skip("no_stage_due");
 
   // Capture the generation at launch time so we can detect session changes
   // mid-pipeline and abort stale work.
   const generation = runtime.captureGeneration(currentSessionIdentity(ctx));
-  if (!runtime.isGenerationActive(generation)) return;
+  if (!runtime.isGenerationActive(generation)) return skip("generation_inactive");
 
   const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
   const consolidationCtx: ConsolidationCtx = {
@@ -752,6 +848,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
       },
     ),
   );
+  return { outcome: "launched", runId };
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -776,7 +873,9 @@ export async function runConsolidationPipeline(
   } catch (error) {
     if (!runtime.isGenerationActive(generation)) return;
     debugLog("observer.error", {
-      errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error),
+      name: error instanceof Error ? error.name : typeof error,
+      message: runtime.recordConsolidationStageError(ctx, "observer", error),
+      stack: error instanceof Error ? error.stack : undefined,
     });
     return;
   }
@@ -1264,6 +1363,7 @@ export async function runObserverStage(
     return "halved";
   };
   let attempt = 0;
+  let firstAttemptError: unknown;
   let sizeSkips = 0;
   while (attempt < MAX_STAGE_ATTEMPTS) {
     const resolved = await resolveModel("observer");
@@ -1591,6 +1691,17 @@ export async function runObserverStage(
                 ? "model called the tool but submitted an empty observations array"
                 : "nothing new to record"
         : "unknown reason";
+      // Unresolved rejected work is NOT successful coverage: every proposal
+      // was invalid (invented source IDs), so the chunk was never actually
+      // observed. Do not advance the cursor to "empty" — that would silently
+      // cover unrecorded work. Leave the cursor where it is so the chunk is
+      // re-offered (next cycle or next model candidate), and warn.
+      if (reason?.kind === "all_rejected") {
+        debugLog("observer.all_rejected", { coversUpToId, count: reason.count });
+        if (ctx.hasUI)
+          ctx.ui?.notify(`Observational memory: no observations — ${reasonLabel}`, "warning");
+        return "continue";
+      }
       const reasonLevel: "info" | "warning" = reason
         ? reason.kind === "no_new_content" || reason.kind === "all_duplicates"
           ? "info"
@@ -1613,6 +1724,7 @@ export async function runObserverStage(
       return continueSources();
     } catch (error) {
       if (!runtime.isGenerationActive(generation)) return "abort";
+      firstAttemptError = error;
       if (isStaleExtensionContextError(error)) {
         debugLog("observer.stale_ctx", { error: String(error) });
         return "abort";
@@ -1689,7 +1801,9 @@ export async function runObserverStage(
       }
       if (!candidateConfig) runtime.recordDeterministicError(resolved.model, error, "observer");
       debugLog("observer.error", {
-        error: String(error),
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
         retryable: isRetryableError(error),
         deterministic: isDeterministicError(error),
         cooldownWorthy: isCooldownWorthyError(error),
@@ -1721,7 +1835,17 @@ export async function runObserverStage(
   runtime.recordConsolidationStageError(
     ctx,
     "observer",
-    new Error("Observer: all model candidates exhausted"),
+    new Error(
+      "Observer: all model candidates exhausted" +
+        (firstAttemptError === undefined
+          ? ""
+          : `; first attempt: ${
+              firstAttemptError instanceof Error
+                ? `${firstAttemptError.name}: ${firstAttemptError.message}`
+                : String(firstAttemptError)
+            }`),
+      { cause: firstAttemptError },
+    ),
   );
   return "abort";
 }
@@ -1876,7 +2000,9 @@ export async function runReflectorStage(
       (b: any) => (b.data as any)?.observations?.length,
     );
     if (!hasPendingObs) {
-      runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "skipped");
+      // No observations to review — do NOT advance the cursor: this is a
+      // scheduling observation, not processed coverage. The accumulation
+      // anchor stays where it is.
       return { outcome: "continue", sameRunReflections: [] };
     }
     observationCoverageId = pending.observation?.coversUpToId;
@@ -1884,30 +2010,33 @@ export async function runReflectorStage(
       const obsIdx = entryIndexForId(entries, pending.observation?.coversUpToId ?? "");
       const refIdx = entryIndexForId(entries, pending.reflection.coversUpToId);
       if (obsIdx >= 0 && refIdx >= 0 && obsIdx <= refIdx) {
+        // All observations are at or before the pending reflection coverage —
+        // already reviewed. Legitimate skip; advance only to the reflection
+        // coverage point (actual processed coverage), not past it.
         runtime.advanceCursor("reflector", pending.reflection.coversUpToId, "skipped");
         return { outcome: "continue", sameRunReflections: [] };
       }
-      if (refIdx >= 0) {
-        reflectionTokens = rawTokensAfterIndex(entries, refIdx);
-        if (reflectionTokens < runtime.config.reflectAfterTokens) {
-          runtime.advanceCursor("reflector", pending.reflection.coversUpToId, "not_due");
-          return { outcome: "continue", sameRunReflections: [] };
-        }
-      } else {
-        reflectionTokens = rawTokensSinceObservationCoverage(entries);
-      }
-    } else {
-      reflectionTokens = rawTokensSinceObservationCoverage(entries);
+    }
+    // Shared accumulation measure (anchors on pending reflection coverage,
+    // falling back to observation coverage). A below-threshold result must
+    // not advance the cursor or reset the anchor.
+    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, pending);
+    if (reflectionTokens < runtime.config.reflectAfterTokens) {
+      return { outcome: "continue", sameRunReflections: [] };
     }
   } else {
-    reflectionTokens = rawTokensSinceReflectionCoverage(entries);
+    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config);
     if (reflectionTokens < runtime.config.reflectAfterTokens) {
-      runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "not_due");
+      // Below threshold: do NOT advance the cursor. Advancing here would
+      // reset the accumulation anchor and lose progress toward the threshold
+      // (the confirmed scheduling defect). The cursor only moves on actual
+      // completed reflection coverage in the commit tail below.
       return { outcome: "continue", sameRunReflections: [] };
     }
     observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
     if (!observationCoverageId) {
-      runtime.advanceCursor("reflector", entries.at(-1)?.id ?? "unknown", "skipped");
+      // No observations recorded yet — nothing to reflect on. Do NOT advance
+      // the cursor; accumulation continues from valid reflection coverage.
       return { outcome: "continue", sameRunReflections: [] };
     }
   }

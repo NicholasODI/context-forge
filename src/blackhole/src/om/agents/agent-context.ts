@@ -59,6 +59,11 @@ export function buildTranscriptAgentContext(
   return { messages: initial ? [initial] : [], tools };
 }
 
+/** A JSON object — the shape pi-ai's toToolDeclaration round-trips. */
+function isUsableToolParameters(parameters: unknown): parameters is Record<string, unknown> {
+	return typeof parameters === "object" && parameters !== null && !Array.isArray(parameters);
+}
+
 /** Build the `AgentContext` the loaded host understands. */
 export function buildAgentContext(systemPrompt: string, tools: AgentTool<any>[]): AgentContext {
 	if (typeof systemPrompt !== "string" || systemPrompt.length === 0) {
@@ -67,6 +72,25 @@ export function buildAgentContext(systemPrompt: string, tools: AgentTool<any>[])
 			`${systemPrompt === undefined ? "undefined" : typeof systemPrompt}. ` +
 			`A worker prompt module failed to initialize.`,
 		);
+	}
+	// A tool schema hits the same initialization boundary: under jiti's ESM/CJS
+	// interop a named import can be undefined, and a schema can surface as a
+	// non-JSON-serializable value (e.g. a function). pi's
+	// toToolDeclaration round-trips `parameters` through
+	// JSON.parse(JSON.stringify(...)) — a function or undefined schema becomes
+	// JSON.parse("undefined") (SyntaxError: JSON Parse error: Unexpected
+	// identifier "undefined") at declaration time, before any model call.
+	// Fail here at the boundary naming the offending tool.
+	for (const tool of tools) {
+		if (!isUsableToolParameters(tool.parameters)) {
+			const label =
+				typeof tool.name === "string" && tool.name.length > 0 ? tool.name : "<unnamed tool>";
+			throw new Error(
+				`buildAgentContext: tool "${label}" has no usable parameters schema (got ` +
+				`${tool.parameters === undefined ? "undefined" : typeof tool.parameters}). ` +
+				`A worker tool-definition import failed to initialize.`,
+			);
+		}
 	}
 	return supportsTranscriptSystemMessages()
 		? buildTranscriptAgentContext(systemPrompt, tools)

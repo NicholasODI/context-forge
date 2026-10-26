@@ -26,6 +26,7 @@ import { registerRecallTool } from "./blackhole/src/tools/recall.ts";
 import { scaffoldSettings } from "./blackhole/src/core/settings.ts";
 import { registerPiVccCommand } from "./blackhole/src/commands/pi-vcc.ts";
 import { registerMemoryCommand } from "./blackhole/src/commands/memory.ts";
+import { registerMemoryConsolidateCommand } from "./blackhole/src/commands/memory-consolidate.ts";
 import { registerBlackholeExportCommand } from "./blackhole/src/commands/blackhole-export.ts";
 import { registerVccRecallCommand } from "./blackhole/src/commands/vcc-recall.ts";
 
@@ -41,6 +42,7 @@ export function registerBlackholeCommands(
 ): void {
 	registerPiVccCommand(pi, omRuntime);
 	registerMemoryCommand(pi, omRuntime);
+	registerMemoryConsolidateCommand(pi, omRuntime);
 	registerBlackholeExportCommand(pi);
 	registerVccRecallCommand(pi);
 }
@@ -70,7 +72,7 @@ export async function registerBlackholeMechanisms(
 	scaffoldSettings();
 
 	if (mechanisms.observationalMemory) {
-		registerConsolidationTrigger(pi, omRuntime);
+		registerConsolidationTrigger(pi, omRuntime, mechanisms);
 	}
 	if (mechanisms.vccCompaction) {
 		registerBeforeCompactHook(pi, omRuntime);

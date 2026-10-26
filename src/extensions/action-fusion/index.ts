@@ -25,6 +25,7 @@ import {
 	type EditToolOptions,
 	type ExtensionAPI,
 	type ExtensionFactory,
+	type ToolDefinition,
 	type WriteToolOptions,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -71,35 +72,54 @@ function memoizeByCwd<T>(create: (cwd: string) => T): (cwd: string) => T {
  * `[PATH#TAG]` headers) instead of a structured `path`; derive the first
  * target file from the leading header for the queue and hash guard.
  */
-function editTargetPath(input: unknown): string {
+export function editTargetPath(input: unknown): string {
+	// omp compat: the host `edit` carries the patch blob under `input.input` (a string
+	// with `[PATH#TAG]` headers), not as the argument itself. Accept the blob under
+	// `input`, a bare string, or a structured `path` field, in that order — falling back
+	// to `.` only when no target can be derived.
+	const headerFrom = (blob: string): string | null => {
+		const header = blob.match(/^\s*\[([^\]]+?)#/m);
+		return header ? header[1] : null;
+	};
 	if (typeof input === "string") {
-		const header = input.match(/^\s*\[([^\]]+?)#/m);
-		if (header) return header[1];
+		const header = headerFrom(input);
+		if (header) return header;
+	}
+	const blob = (input as { input?: unknown } | null)?.input;
+	if (typeof blob === "string") {
+		const header = headerFrom(blob);
+		if (header) return header;
 	}
 	const path = (input as { path?: unknown } | null)?.path;
 	return typeof path === "string" ? path : ".";
 }
 
 export function createActionFusionExtension(options: ActionFusionOptions = {}): ExtensionFactory {
-	const baseEdit = memoizeByCwd((cwd: string) => createEditToolDefinition(cwd, options.editOptions));
+	const editParameters = Type.Object({
+		input: Type.String({ description: "One or more [PATH#TAG] sections containing hashline operations." }),
+		then_run: createThenRunSchema(EDIT_THEN_RUN_DESCRIPTION),
+	});
+	const writeParameters = Type.Object({
+		path: Type.String({ description: "Target path. Plain paths write files; writable internal URLs, archive entries, and SQLite rows are supported." }),
+		content: Type.String({ description: "Full replacement content." }),
+		then_run: createThenRunSchema(WRITE_THEN_RUN_DESCRIPTION),
+	});
+
+	// omp compat: the host's built-in `edit` tool is typed from the pi-coding-agent
+	// package against a structured `{path, edits}` contract, but the omp runtime's
+	// `edit` accepts an `input` patch blob ([PATH#TAG] headers), and that is what
+	// the fused tool's delegated native call uses. Cast the built-in definition to
+	// the fused tool's own contract so the spread and the native `.execute` call
+	// (which passes the `{input}` blob) type-check against it; parameters/execute
+	// are re-declared by each registerTool below.
+	const baseEdit = memoizeByCwd(
+		(cwd: string) => createEditToolDefinition(cwd, options.editOptions) as unknown as ToolDefinition<typeof editParameters, EditToolDetails | undefined>,
+	);
 	const baseWrite = memoizeByCwd((cwd: string) => createWriteToolDefinition(cwd, options.writeOptions));
 
 	return (pi: ExtensionAPI) => {
 		const editTemplate = baseEdit(process.cwd());
 		const writeTemplate = baseWrite(process.cwd());
-
-		// omp compat: the host's built-in definitions expose `parameters` as a
-		// compiled omptype builder without `.properties`, so declare the base
-		// contracts explicitly (write: path+content, edit: the input patch blob).
-		const editParameters = Type.Object({
-			input: Type.String({ description: "One or more [PATH#TAG] sections containing hashline operations." }),
-			then_run: createThenRunSchema(EDIT_THEN_RUN_DESCRIPTION),
-		});
-		const writeParameters = Type.Object({
-			path: Type.String({ description: "Target path. Plain paths write files; writable internal URLs, archive entries, and SQLite rows are supported." }),
-			content: Type.String({ description: "Full replacement content." }),
-			then_run: createThenRunSchema(WRITE_THEN_RUN_DESCRIPTION),
-		});
 
 		pi.registerTool<typeof editParameters, EditToolDetails | undefined>({
 			...editTemplate,

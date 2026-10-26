@@ -162,9 +162,23 @@ function hasUsableAuth(auth: { apiKey?: unknown; headers?: unknown }): boolean {
   );
 }
 
+// Monotonic per-process discriminator for Runtime instances. The extension
+// builds a fresh Runtime per load, so the counter gives the debug log a way
+// to distinguish multiple instances (double-registration) of the extension.
+let runtimeInstanceCounter = 0;
+function nextRuntimeInstanceId(): string {
+  return `inst-${++runtimeInstanceCounter}`;
+}
+
 export class Runtime {
   config: Config = { ...DEFAULTS };
   configLoaded = false;
+  /**
+   * Stable per-process identity for this extension instance. Correlates
+   * registration → trigger → launch events in the debug log, and surfaces
+   * double-registration of the extension when two instances both fire.
+   */
+  readonly instanceId: string = nextRuntimeInstanceId();
   consolidationInFlight = false;
   consolidationPromise: Promise<void> | null = null;
   consolidationPhase: ConsolidationPhase | undefined;
@@ -298,8 +312,16 @@ export class Runtime {
 
   /**
    * Captures the current generation for use in deferred work.
-   * The returned RuntimeGeneration carries a generation number,
-   * session identity, and an AbortSignal that fires on session change.
+   * The generation counter and AbortSignal are the stale-work tripwires. The
+   * captured `sessionIdentity` is a correlation label only (debug log, run
+   * attribution) — deliberately NOT part of the activity check, because the
+   * host's `getSessionId()` is ephemeral at `session_start` (a throwaway
+   * boot manager) and becomes the persisted file's header id once a resume
+   * swaps the SessionManager in without a second `session_start`. Comparing
+   * trigger-time against start-time identity would read every trigger of a
+   * resumed session as `generation_inactive` although nothing about the
+   * runtime changed. Genuine swaps still invalidate a capture: they bump the
+   * generation and abort the signal (see `startSession` / `dispose`).
    */
   captureGeneration(sessionIdentity: string | undefined): RuntimeGeneration {
     return {
@@ -311,20 +333,22 @@ export class Runtime {
 
   /**
    * Checks whether a captured generation is still active.
-   * Returns false when the runtime is disposed, the signal is aborted,
-   * the generation counter has advanced, or the session identity changed.
+   * Returns false when the runtime is disposed, the capture's signal has been
+   * aborted, or the generation counter has advanced past the capture.
    *
-   * When `startSession` was never called (`this.sessionIdentity` is undefined),
-   * the identity check is skipped — this allows tests and direct pipeline
-   * calls to work without explicitly calling `startSession` first.
+   * Deliberately ignores `captured.sessionIdentity`: the host's session id
+   * is ephemeral at `session_start` and diverges from the persisted header
+   * id after a resume, so comparing start-time to trigger-time identity
+   * binds the gate to a label the host is free to change under a live
+   * session. A real session swap still trips the gate: `startSession`
+   * (identity change) bumps the generation and aborts the captured signal,
+   * and `dispose()` disposes the runtime. A run surviving an identity swap
+   * is safe: each stage re-resolves the branch and id from the live
+   * `sessionManager`, and cursors are validated against the live branch at
+   * load.
    */
   isGenerationActive(captured: RuntimeGeneration): boolean {
-    return (
-      !this.disposed &&
-      !captured.signal.aborted &&
-      captured.generation === this.generation &&
-      (this.sessionIdentity === undefined || captured.sessionIdentity === this.sessionIdentity)
-    );
+    return !this.disposed && !captured.signal.aborted && captured.generation === this.generation;
   }
 
   /**
@@ -1083,10 +1107,14 @@ export class Runtime {
 
   recordConsolidationStageError(ctx: LaunchCtx, phase: ConsolidationPhase, error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error ? error.cause : undefined;
     debugLog("stage.error", {
       phase,
       message,
       stack: error instanceof Error ? error.stack : undefined,
+      ...(cause instanceof Error
+        ? { causeMessage: `${cause.name}: ${cause.message}`, causeStack: cause.stack }
+        : {}),
     }, true);
     if (phase === "observer") this.lastObserverError = message;
     if (phase === "reflector") this.lastReflectorError = message;

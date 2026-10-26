@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type BashToolOptions, createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type BashToolOptions, createBashToolDefinition, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { withFusedFileQueue } from "./file-queue.ts";
 
@@ -90,7 +90,7 @@ export async function executeMutationThenRun<TDetails>({
 	mutate: () => Promise<AgentToolResult<TDetails>>;
 	bashOptions: BashToolOptions | undefined;
 	signal: AbortSignal | undefined;
-	ctx: ExtensionContext;
+	ctx: ExtensionToolContext;
 }): Promise<AgentToolResult<TDetails>> {
 	return withFusedFileQueue(absolutePath, async () => {
 		let mutationResult: AgentToolResult<TDetails>;
@@ -105,6 +105,19 @@ export async function executeMutationThenRun<TDetails>({
 
 		if (thenRun === undefined) {
 			return mutationResult;
+		}
+
+		if (mutationResult.isError === true) {
+			// The native mutation tool reports a rejection by returning a result with
+			// `isError: true` rather than throwing. Honor the documented "Skipped if the
+			// edit fails": do not run the command, and keep the rejection message.
+			return {
+				...mutationResult,
+				content: [
+					...mutationResult.content,
+					{ type: "text", text: `${THEN_RUN_SKIPPED} the mutation failed; the command was not run.` },
+				],
+			};
 		}
 
 		await assertUnchangedBeforeCommand(absolutePath);

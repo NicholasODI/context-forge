@@ -145,6 +145,9 @@ function createCustomMessage(
 export function sessionEntryToContextMessages(entry: PortedEntry): PortedMessage[] {
 	if (entry.type === "message") {
 		const message = entry.message;
+		// Session files are parsed without validation; a `message` entry can carry
+		// no message object at all (old versions, forks, hand-edits) — drop it.
+		if (message == null) return [];
 		// Session files are parsed without validation; old versions, forks, or
 		// hand-edited files can contain messages with null/missing content.
 		if (
@@ -156,7 +159,10 @@ export function sessionEntryToContextMessages(entry: PortedEntry): PortedMessage
 		return [message];
 	}
 	if (entry.type === "custom_message") {
-		return [createCustomMessage(entry.customType ?? "", entry.content ?? [], entry.display ?? false, entry.details, entry.timestamp ?? "")];
+		// Raw session content is unvalidated; keep only the shapes createCustomMessage accepts.
+		const content: string | readonly PortedBlock[] =
+			typeof entry.content === "string" || Array.isArray(entry.content) ? entry.content : [];
+		return [createCustomMessage(entry.customType ?? "", content, entry.display ?? false, entry.details, entry.timestamp ?? "")];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
 		return [createBranchSummaryMessage(entry.summary, entry.fromId ?? "", entry.timestamp ?? "")];

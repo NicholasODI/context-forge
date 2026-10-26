@@ -224,12 +224,15 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   let criticalCandidateIdsCount = 0;
   let duplicateInRequestCount = 0;
   let duplicateInRunCount = 0;
-  const dropObservations: AgentTool<typeof DropObservationsSchema> = {
+  const dropObservations: AgentTool<any> = {
     name: "drop_observations",
     label: "Drop observations",
     description: "Propose active observation ids that are safe to remove from compacted memory.",
     parameters: DropObservationsSchema,
-    execute: async (_id, params: DropObservationsArgs) => {
+    execute: async (_id, rawParams) => {
+      // pi-ai's validateToolArguments already checked the raw arguments against
+      // the plain schema on this definition; bind the typed shape here.
+      const params = rawParams as DropObservationsArgs;
       toolCallCount++;
       rawRequestedIdsCount += params.ids.length;
       const seenInRequest = new Set<string>();
@@ -304,7 +307,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
       timestamp: Date.now(),
     },
   ];
-  const context = buildAgentContext(DROPPER_SYSTEM, [dropObservations as AgentTool<any>]);
+  const context = buildAgentContext(DROPPER_SYSTEM, [dropObservations]);
 const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
   const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;

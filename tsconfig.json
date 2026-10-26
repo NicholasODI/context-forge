@@ -1,16 +1,1 @@
-{
-	"compilerOptions": {
-		"target": "ES2022",
-		"lib": ["ES2022"],
-		"module": "ESNext",
-		"moduleResolution": "bundler",
-		"strict": true,
-		"noEmit": true,
-		"forceConsistentCasingInFileNames": true,
-		"esModuleInterop": true,
-		"types": ["node", "vitest/globals"],
-		"allowImportingTsExtensions": true,
-		"skipLibCheck": true
-	},
-	"include": ["src/**/*.ts", "tests/**/*.ts"]
-}
+{"compilerOptions":{"target":"es2022","lib":["es2022"],"module":"esnext","moduleResolution":"bundler","types":["node"],"strict":true,"noEmit":true,"skipLibCheck":true,"esModuleInterop":true,"isolatedModules":true,"allowImportingTsExtensions":true,"useDefineForClassFields":true,"forceConsistentCasingInFileNames":true},"include":["**/*.ts"]}

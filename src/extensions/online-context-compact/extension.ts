@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { buildSessionContext, estimateTokens, type ExtensionContext, type ExtensionFactory, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, estimateTokens, type CompactionResult, type ExtensionContext, type ExtensionFactory, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { findCutPoint, sessionEntryToContextMessages } from "./host-ports.ts";
 import { formatSavingsCount, showSolPiSavings } from "../../tui.ts";
 import {
@@ -65,7 +65,7 @@ function tokenEstimate(text: string): number {
 
 /** omp compat: this host returns the system prompt as an array of parts, not one string. */
 const systemPromptText = (context: ExtensionContext): string => {
-	const prompt = context.getSystemPrompt();
+	const prompt = context.getSystemPrompt() as string | readonly unknown[];
 	if (typeof prompt === "string") return prompt;
 	if (Array.isArray(prompt)) return prompt.map((part) => String(part)).join("\n");
 	return "";
@@ -268,8 +268,10 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		// state stays intact if economic triggering is ever re-enabled.
 
 		// omp compat: this host has no `agent_settled` event; `session_stop` is
-		// its documented main-session stop hook (awaited before settle).
-		pi.on("session_stop", async (_event, context) => {
+		// its documented main-session stop hook (awaited before settle). The pi
+		// types' on() overloads lack `session_stop`, so widen the registration
+		// signature inline — keeping the handler body fully type-checked.
+		(pi.on as unknown as (event: "session_stop", handler: (event: unknown, context: ExtensionContext) => void) => () => void)("session_stop", async (_event, context) => {
 			// sendMessage() starts a turn without returning its promise. Capture the
 			// child settlement so print/JSON mode cannot dispose while it is running.
 			const parentContinuation = nextContinuation;
@@ -303,7 +305,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					};
 					context.compact({
 						customInstructions: BOUNDARY_COMPACTION_INSTRUCTIONS,
-						onComplete: (compaction) => {
+						onComplete: (compaction: CompactionResult) => {
 							try {
 								compacted = true;
 								const removed = Math.max(
@@ -321,7 +323,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 								finish();
 							}
 						},
-						onError: (error) => {
+						onError: (error: Error) => {
 							compactionError = error;
 							finish();
 						},

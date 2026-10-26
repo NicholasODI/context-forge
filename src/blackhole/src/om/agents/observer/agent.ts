@@ -232,7 +232,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
   // covered, and rejections mean the tool just told it corrections remain.
   let closedByCompleteBatch = false;
 
-const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
+  const recordObservations: AgentTool<any> = {
     name: "record_observations",
     label: "Record observations",
     description:
@@ -240,9 +240,13 @@ const recordObservations: AgentTool<typeof RecordObservationsSchema> = {
       "complete=true ends fully valid chunk coverage; use complete=false when more observations or corrections remain. " +
       "Incomplete or rejected work stays open.",
     parameters: RecordObservationsSchema,
-execute: async (_id, params: RecordObservationsArgs) => {
+    execute: async (_id, rawParams) => {
+      // pi-ai's validateToolArguments already checked the raw arguments against
+      // the plain schema on this definition; bind the typed shape here.
+      const params = rawParams as RecordObservationsArgs;
       toolCalled = true;
       lastBatchComplete = params.complete === true;
+      totalProposed += params.observations.length;
       let added = 0;
       let duplicates = 0;
       let rejected = 0;
@@ -271,7 +275,14 @@ execute: async (_id, params: RecordObservationsArgs) => {
         });
         added++;
       }
-      if (params.complete === true && rejected === 0 && added + duplicates > 0) {
+      totalAdded += added;
+      totalDuplicates += duplicates;
+      totalRejected += rejected;
+      // A fully valid complete=true batch closes the chunk — including an
+      // empty final batch after earlier valid partials (the sanctioned
+      // "covered, nothing more" close). Rejections mean corrections remain,
+      // so they never close.
+      if (params.complete === true && rejected === 0) {
         closedByCompleteBatch = true;
       } else if (added > 0 || rejected > 0) {
         closedByCompleteBatch = false;
@@ -309,7 +320,7 @@ ${conversation}`;
       timestamp: Date.now(),
     },
   ];
-  const context = buildAgentContext(OBSERVER_SYSTEM, [recordObservations as AgentTool<any>]);
+  const context = buildAgentContext(OBSERVER_SYSTEM, [recordObservations]);
 
   const reasoning = (model as { reasoning?: unknown }).reasoning;
   const thinkingLevel = args.thinkingLevel ?? "low";
