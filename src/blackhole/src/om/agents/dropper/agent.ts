@@ -3,9 +3,8 @@
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/agents/dropper/agent.ts)
  * Modified by pi-vcc-om: an agent_end whose run did not complete — stopReason
- * `error`/`aborted`/`length`, a terminal `toolUse` without the turn cap, or an
- * aborted attempt signal — always throws, since the tool has no complete flag
- * to prove the evaluation finished: a prefix of the proposed candidates
+ * `error`/`aborted`/`length`, an unclosed terminal `toolUse`, or an
+ * aborted attempt signal — fails without a validated completion: a prefix of the proposed candidates
  * reported as success would be written under an OM_OBSERVATIONS_DROPPED marker
  * that a cadence run never re-evaluates. The same guard covers a run the agent
  * turn cap cut off.
@@ -223,6 +222,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
   const proofs: DropEvidence = {};
   const proposed = new Set<string>();
   const allowed = new Map(observations.map((observation) => [observation.id, observation]));
+  let closedByCompleteBatch = false;
   let toolCallCount = 0;
   let rawRequestedIdsCount = 0;
   let missingIdsCount = 0;
@@ -242,6 +242,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
       rawRequestedIdsCount += params.ids.length;
       const seenInRequest = new Set<string>();
       let added = 0;
+      let rejected = 0;
       let requestMissingIds = 0;
       let requestCriticalCandidateIds = 0;
       let requestDuplicateIds = 0;
@@ -249,6 +250,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
       for (const id of params.ids) {
         const observation = allowed.get(id);
         if (!observation) {
+          rejected++;
           missingIdsCount++;
           requestMissingIds++;
           continue;
@@ -260,7 +262,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
         }
         if (observation.pinned || observation.relevance === "critical" || typeof params.reason !== "string" || !params.reason.trim() ||
             !Array.isArray(replacements) || replacements.length === 0 ||
-            !replacements.every(refId => reflections.some(r => r.id === refId && r.supportingObservationIds.includes(id)))) continue;
+            !replacements.every(refId => reflections.some(r => r.id === refId && r.supportingObservationIds.includes(id)))) { rejected++; continue; }
         if (seenInRequest.has(id)) {
           duplicateInRequestCount++;
           requestDuplicateIds++;
@@ -277,7 +279,10 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
         proposedDropIds.push(id);
         added++;
       }
+      const complete = params.complete === true && rejected === 0;
+      if (complete) closedByCompleteBatch = true;
       debugLog("dropper.tool_call", {
+        complete, rejected,
         toolCallCount,
         rawRequestedIdsCount: params.ids.length,
         acceptedIdsCount: added,
@@ -292,14 +297,15 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
         content: [
           {
             type: "text",
-            text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.`,
+            text: `${complete ? "Evaluation complete." : "Evaluation remains open; finish with complete=true after reviewing all candidates."} Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.`,
           },
         ],
         details: {
           added,
           totalCandidates: proposedDropIds.length,
-          maxDropsAllowed,
+          maxDropsAllowed, complete, rejected,
         },
+        terminate: complete,
       };
     },
   };
@@ -309,7 +315,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
     ? `EXISTING ACTIVE OBSERVATIONS (for context only — these are NOT candidates for dropping):\n${args.existingObservationsSummary}\n\n`
     : "";
 
-  const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${existingObservationsContext}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nPool-wide maximum drops: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"} (advisory for this batch — the run may evaluate the pool in several batches and re-applies the cap globally over the merged proposals).\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
+  const userText = `CURRENT REFLECTIONS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\n${existingObservationsContext}NEW OBSERVATIONS TO EVALUATE FOR DROPPING:\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target: ~${dropTargetTokens(budgetTokens, args.targetTokens).toLocaleString()} tokens; pool budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nPool-wide maximum drops: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"} (advisory for this batch — the run may evaluate the pool in several batches and re-applies the cap globally over the merged proposals).\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
   const prompts: Message[] = [
     {
       role: "user",
@@ -373,12 +379,9 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
           stopReason?: string;
           errorMessage?: string;
         }>;
-        // `length`/`aborted`/terminal `toolUse` are not completions either: the
-        // stage writes an OM_OBSERVATIONS_DROPPED marker over the whole window,
-        // so a cut-off evaluation reported as success would never revisit the
-        // observations past the cut. `drop_observations` carries no complete
-        // flag, so only a turn-cap end on a tool-work turn is exempt.
-        agentError = agentCompletionError(msgs, signal, turnCap?.exhausted);
+        // A validated explicit final batch may end on toolUse. Other terminal
+        // tool turns remain incomplete; error/length/abort still fail below.
+        agentError = agentCompletionError(msgs, signal, closedByCompleteBatch || turnCap?.exhausted);
         failureKind = agentFailureStopReason(msgs);
       }
     }
@@ -403,6 +406,7 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
   // provider-error classification — the cap did not cause it.
   if (
     turnCap?.exhausted &&
+    !closedByCompleteBatch &&
     proposedDropIds.length > 0 &&
     !signal?.aborted &&
     failureKind !== "error" &&
@@ -415,11 +419,8 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
     );
   }
 
-  // `drop_observations` carries no complete flag, so no batch can prove the
-  // evaluation finished. The stage writes an OM_OBSERVATIONS_DROPPED marker over
-  // the whole observation window and a cadence run never revisits what it
-  // covers, so a failure discards the prefix rather than publishing it as a
-  // finished evaluation.
+  // Only explicit completion sanctions toolUse; never publish partial work
+  // after a provider error, output cut, abort, or an unclosed terminal tool turn.
   if (agentError) {
     // A `length` terminal marks the run output-capped (input-size-dependent,
     // not a broken model) so the stage can break the session retry loop

@@ -17,10 +17,11 @@ export const DropObservationsSchema = {
   properties: {
     ids: {
       type: "array",
-      minItems: 1,
+      minItems: 0,
       maxItems: 128,
       items: { type: "string", minLength: 1 },
     },
+    complete: { type: "boolean", description: "True only after evaluating the entire provided candidate list. A valid final batch terminates the worker immediately; ids may be empty." },
     // Required for an auditable removal; omitted reasons cannot authorize drops.
     reason: { type: "string", minLength: 1, maxLength: 1000 },
     replacements: {
@@ -34,6 +35,7 @@ export const DropObservationsSchema = {
 
 export interface DropObservationsArgs {
   ids: string[];
+  complete?: boolean;
   reason: string;
   replacements: Record<string, string[]>;
 }

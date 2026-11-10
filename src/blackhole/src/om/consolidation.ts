@@ -2774,6 +2774,7 @@ export async function runDropperStage(
         pressureReached ? pressurePoolSignature : undefined,
       );
     }
+    runtime.lastDropperError = undefined;
     return "continue";
   };
 
