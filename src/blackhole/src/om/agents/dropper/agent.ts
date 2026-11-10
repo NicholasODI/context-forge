@@ -339,7 +339,7 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
 
   const fullnessPercent = Math.round(fullness * 100);
   const existingObservationsContext = args.existingObservationsSummary
-    ? `EXISTING ACTIVE OBSERVATIONS (for context only — these are NOT candidates for dropping):\n${args.existingObservationsSummary}\n\n`
+    ? `EXISTING ACTIVE OBSERVATIONS (capped context only — NOT drop candidates; omission does not imply obsolescence):\n${args.existingObservationsSummary}\n\n`
     : "";
 
   const userText = `REPLACEMENT REFLECTIONS — these IDs are replacement values only, NEVER drop IDs:\n${joinOrEmpty(reflections.map(reflectionToDropperLine))}\n\n${existingObservationsContext}CANDIDATE OBSERVATIONS — only these IDs may be proposed for dropping (KEEP entries are protected/ineligible):\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById), reflections)))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target: ~${dropTargetTokens(budgetTokens, args.targetTokens).toLocaleString()} tokens; pool budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nPool-wide maximum drops: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"} (advisory for this batch — the run may evaluate the pool in several batches and re-applies the cap globally over the merged proposals).\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
@@ -502,10 +502,11 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
         : proposedDropIds.length === 0
           ? "all_filtered"
           : "selected_empty";
-  const selectedDropTokens = droppedIds.reduce(
+  const selectedDropContentTokens = droppedIds.reduce(
     (sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0),
     0,
   );
+  const selectedDropTokens = droppedIds.reduce((sum, id) => sum + observationRenderedTokens(allowed.get(id)!), 0);
   debugLog("dropper.result", {
     reason,
     toolCallCount,
@@ -517,6 +518,7 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
     acceptedCandidateCount: proposedDropIds.length,
     selectedDropsCount: droppedIds.length,
     selectedDropTokens,
+    selectedDropContentTokens,
     selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(
       droppedIds,
       observations,

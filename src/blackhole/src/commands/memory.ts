@@ -21,6 +21,8 @@ import {
   foldLedger,
   fullProjection,
   observationPoolTokens,
+  livePoolObservations,
+  livePoolReflections,
   observationToSummaryLine,
   rawTokensAfterIndex,
   rawTokensSinceDropCoverage,
@@ -34,6 +36,7 @@ import {
 import { memoryDiagnostics, renderMemoryDiagnostics } from "../om/ledger/diagnostics.js";
 import { readPendingState } from "../om/pending.ts";
 import { reflectionAccumulatedTokens } from "../om/consolidation.js";
+import { dropEligibility } from "../om/agents/dropper/planning.js";
 import { dropTargetTokens } from "../om/agents/dropper/selection.js";
 import {
   isFixedTokenThreshold,
@@ -195,6 +198,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
       const { tokens: poolTokens } = observationPoolTokens(entries, pending);
       // Manual mode keeps records out of the branch; surface the pending share
       // explicitly so a manual-only user can see where the pool number comes from.
+      const eligibility = dropEligibility(livePoolObservations(entries, pending), livePoolReflections(entries, pending));
       const branchPoolTokens = pending ? observationPoolTokens(entries).tokens : poolTokens;
       const pendingPoolTokens = poolTokens - branchPoolTokens;
       const poolScopeSuffix =
@@ -249,6 +253,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         `Observer:       ~${obsProgress.toLocaleString()} tokens (triggers at ${runtime.config.observeAfterTokens.toLocaleString()})`,
         `Reflector:      ~${reflectionProgress.toLocaleString()} tokens (triggers at ${runtime.config.reflectAfterTokens.toLocaleString()} with new observations)`,
         `Dropper:        pool ${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}% — target ~${dropTargetTokens(runtime.config.observationsPoolMaxTokens, runtime.config.observationsPoolTargetTokens).toLocaleString()} tokens; eligible above target and ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% with new data; ${pressureHint(runtime.config)} (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
+        `Drop eligibility: ${eligibility.counts.eligible} citation-eligible (~${eligibility.tokens.eligible.toLocaleString()} tokens); ${eligibility.counts.protected} protected (~${eligibility.tokens.protected.toLocaleString()}); ${eligibility.counts.uncovered} uncovered (~${eligibility.tokens.uncovered.toLocaleString()}). Eligible still requires a safe-equivalence judgment.`,
         `Compaction:     ~${compactionProgress.toLocaleString()} tokens` +
           (isManualMode(runtime.config)
             ? " [manual]"

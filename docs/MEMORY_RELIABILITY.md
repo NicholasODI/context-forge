@@ -166,6 +166,39 @@ once enough safe proposed records meet the target. Safety vetoes, count caps,
 or missing replacement coverage can leave the pool above target. Full evidence
 remains archived regardless of summary selection.
 
+The main-model `reflectionsPoolMaxTokens` budget does **not** cap dropper proof
+availability. The worker considers active-ledger reflections that cite eligible
+observations, including references omitted from the latest main summary. Only
+unprotected observations with citation coverage go to the model as candidates;
+optional read-only context is separately bounded. Structural eligibility alone
+does not establish safe equivalence or require a drop.
+
+A replacement reference remains stored and recallable; pruning does not pin it
+or force it into the budget-limited main summary. Source retention and live
+context inclusion remain separate. Explicitly pin facts that must stay in the
+working context, and keep that protected core within its output budgets.
+
+`dropperInputMaxTokens` and the resolved worker context bound the joint input:
+candidate text, every relevant provided proof, static instructions/tool schema,
+read-only context, and turn headroom. Larger candidate sets use bounded batches
+with only their relevant reflections. Shared proof is charged once per batch;
+a single oversized proof bundle defers the run without advancing coverage.
+Selections/proofs merge globally and commit once after all batches succeed. A
+later failed batch cannot publish earlier partial drops. This can use several
+existing dropper requests while catching up; it adds no new worker type.
+
+`/blackhole-memory` reports a **Drop eligibility** line with citation-eligible,
+protected, and uncovered record/token counts across the active ledger. Large
+protected/uncovered totals can prevent reaching the pruning target even when
+the worker works correctly. Debug event `dropper.eligibility` gives the actual
+run scope and evidence counts. `dropper.committed` records the final selection
+and rendered token reduction; per-batch `dropper.result` can report raw proposals
+with zero selected until that global commit. New `selectedDropTokens` values use
+rendered costs; `selectedDropContentTokens` preserves the content-only figure
+used by older result logs. Old empty verdicts are rechecked after this policy
+upgrade, new evidence, or changes to relevant pool/worker budgets or configured
+worker models. These controls do not force removals to meet a quota.
+
 ## Local worker settings
 
 Merge overrides into the existing Blackhole configuration, not the top-level
