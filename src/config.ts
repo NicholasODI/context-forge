@@ -34,6 +34,7 @@ export interface ContextForgeConfig {
 	readonly observationalMemory: boolean;
 	readonly vccCompaction: boolean;
 	readonly unifiedRecall: boolean;
+	readonly projectMemory: boolean;
 }
 
 export const DEFAULT_CONFIG: ContextForgeConfig = Object.freeze({
@@ -48,6 +49,7 @@ export const DEFAULT_CONFIG: ContextForgeConfig = Object.freeze({
 	observationalMemory: true,
 	vccCompaction: true,
 	unifiedRecall: true,
+	projectMemory: true,
 });
 
 const FEATURE_KEYS = [
@@ -58,6 +60,7 @@ const FEATURE_KEYS = [
 	"observationalMemory",
 	"vccCompaction",
 	"unifiedRecall",
+	"projectMemory",
 ] as const;
 const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"] as const;
 const CONFIG_KEYS = new Set<string>(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio"]);

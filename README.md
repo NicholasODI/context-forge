@@ -68,7 +68,8 @@ Example:
   "cacheWriteReadRatio": 12.5,
   "observationalMemory": true,
   "vccCompaction": true,
-  "unifiedRecall": true
+  "unifiedRecall": true,
+  "projectMemory": true
 }
 ```
 
@@ -86,6 +87,93 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 ## Tools
 
 - **`recall`** — unified recall over session lineage, file content, and touched-file summaries, with paging and scope control.
+- **`project_memory`** — maintain a project-local task note and decision log with evidence and freshness tracking.
+
+## Durable task and decision notes
+
+The `projectMemory` feature (default `true`) complements observational memory with
+explicit project state. It does **not** change worker thresholds, the memory
+ledger, or compaction. No files are created until the agent calls the
+`project_memory` tool to write a record in a trusted project.
+
+To start, ask: **“Record our current goal, completed progress, and next steps in
+project memory. Record important decisions with their rationale and evidence.”**
+The agent should update it after meaningful progress, not on every tool call.
+This feature supplies storage and tool guidance; it does not infer decisions or
+create extra model calls in the background.
+
+The extension maintains these files at the Git root, or the current working
+directory for a non-Git project:
+
+| File | Purpose |
+|---|---|
+| `.context-forge/TASK.md` | Current goal, status, progress, next steps, and evidence |
+| `.context-forge/DECISIONS.md` | Decisions and rationale, including invalidated and superseded history |
+| `.context-forge/memory.json` | Authoritative structured state, evidence fingerprints, and revision |
+
+The Markdown files are generated views. Update through the tool; existing
+user-authored files with these names are not overwritten. You may commit these
+files for review and handoff, but the extension never commits them or edits
+`AGENTS.md`. Do not record secrets. `/forge-memory` displays current state;
+`/forge-memory refresh` regenerates the Markdown views without rerunning checks
+or declaring evidence valid again.
+
+The tool supports `read`, `set_task`, `record_decision`, `verify`, `invalidate`,
+and `supersede`. Read first; each mutation requires `expectedRevision` to avoid
+overwriting another session's updates. `set_task` replaces the current task;
+include its complete progress and next-step lists. Decision IDs are returned by
+the tool; superseding retains the original in the full log.
+
+Example tool arguments after an initial `read` reports revision 0:
+
+```json
+{
+  "action": "set_task",
+  "expectedRevision": 0,
+  "text": "Fix resumed-session observer execution",
+  "status": "active",
+  "progress": ["Identified the session identity mismatch"],
+  "nextSteps": ["Implement the fix", "Run the isolated regression"],
+  "files": ["src/blackhole/src/om/runtime.ts"],
+  "sources": ["User requested observer/reflector reliability"]
+}
+```
+
+File evidence is hashed from actual project files. Checks record the agent's
+reported command and result; the tool does **not** execute or independently
+validate tests. Only record checks that were actually run.
+
+- **Current** means recorded file fingerprints and the available Git
+  HEAD/tracked-diff snapshot have not changed. It does not prove a claim true.
+- **Stale** means evidence changed/disappeared, repository state changed, or the
+  record was explicitly invalidated. Reinspect/retest before `verify` captures
+  a new evidence snapshot.
+- **Unverified** means there is no freshness-trackable evidence. Source
+  references alone are retained as provenance, not verification. Checks in a
+  non-Git directory need file evidence for meaningful freshness tracking.
+- **Superseded** decisions remain on disk but leave the active reminder.
+
+Git freshness covers tracked changes; explicitly list relevant untracked files
+as evidence too. Files outside the project, symlink evidence, and files over
+4 MiB are rejected. File contents are not copied into evidence—only paths and
+SHA-256 hashes. Read-only freshness checks do not rewrite state or advance any
+observer/reflector cursor. Markdown freshness labels reflect their last
+generation; the tool and context reminder recompute them when read.
+
+On each main-session `context` event, after compaction projection, the extension
+adds one live reminder containing the task and up to eight recent active
+decisions. It is capped at **8,000 characters**, not provider-specific tokens;
+the full history remains on disk. The reminder is not appended to the session
+transcript, and is rebuilt after compaction and resume. It supplies reference
+data, not authorization to start an old task. In untrusted projects or with
+`"projectMemory": false` in `context-forge.json`, it is not loaded.
+
+Concurrent writers use a lock and revision checks. If a process crashes leaving
+`.context-forge/write.lock`, inspect whether another writer is active before
+manually removing that directory. Each file is replaced atomically, with the
+JSON source committed last; if a write is interrupted, read the source revision
+and refresh its generated documents. This is project state shared by sessions
+of the same checkout; it is not a private per-session scratchpad.
 
 ## Development
 
