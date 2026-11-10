@@ -7,7 +7,7 @@
  *   and renderSummary to append observations/reflections to the output.
  * - This is the single joining point between pi-vcc and OM.
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { writeFileSync } from "fs";
 import {
@@ -18,11 +18,13 @@ import {
   stripOMContent,
   stripRecallNotes,
 } from "../core/summarize";
+import { stripContinuity, withContinuity, type ContinuityBlock } from "../core/continuity.js";
 import { buildAppendOnlyDetails, coverageForMessages } from "../core/compaction-chain.js";
 import { getModelProvider, matchesSkippedProvider } from "../core/provider-skip.js";
 import type { PiVccCompactionDetails } from "../details";
 import { buildCompactionProjection, renderSummary, PinnedMemoryOverflowError } from "../om/ledger/index.js";
 import type { Runtime } from "../om/runtime.js";
+import { OM_SELECTION, type SelectionSnapshot } from "../om/ledger/diagnostics.js";
 import { debugLog } from "../om/debug-log.js";
 import { effectiveContextWindow } from "../om/model-budget.js";
 import { DEFAULTS, configFileNeedsMigration } from "../core/unified-config.js";
@@ -299,8 +301,8 @@ const REASON_MESSAGES: Record<OwnCutCancelReason, string> = {
     'blackhole: Too few live messages — Pi\'s default logic preserves visible context. Set tailBehavior to "minimal" in config to force compaction with fewer messages.',
 };
 
-export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) => {
-  pi.on("session_before_compact", (event, ctx) => {
+export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, loadContinuity?: (ctx: ExtensionContext) => Promise<ContinuityBlock | undefined>) => {
+  pi.on("session_before_compact", async (event, ctx) => {
     const { preparation, branchEntries, customInstructions } = event;
     const isPiVcc = customInstructions === PI_VCC_COMPACT_INSTRUCTION;
 
@@ -708,24 +710,26 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     let omContent: string;
     let omDetails: Record<string, unknown> | undefined;
     let omHasContent = false;
+    let selection: SelectionSnapshot | undefined;
     trace("before_compact.om_injection", {
       memoryEnabled: omRuntime.config.memory !== false,
     });
     if (omRuntime.config.memory !== false) {
-      let projection;
-      try { projection = buildCompactionProjection(branchEntries as any[], firstKeptEntryId, {
+      const selectionConfig = {
         observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens,
-        reflectionsPoolMaxTokens:
-          omRuntime.config.reflectionsPoolMaxTokens ?? DEFAULTS.reflectionsPoolMaxTokens,
+        reflectionsPoolMaxTokens: omRuntime.config.reflectionsPoolMaxTokens ?? DEFAULTS.reflectionsPoolMaxTokens,
         fullFoldAlways: omRuntime.config.fullFoldAlways,
-        taskQuery: extractSection(summary, "Session Goal"),
-      }); } catch (error) {
+        taskQuery: extractSection(summary, "Session Goal").slice(0, 2000),
+      };
+      let projection;
+      try { projection = buildCompactionProjection(branchEntries as any[], firstKeptEntryId, selectionConfig); } catch (error) {
         if (!(error instanceof PinnedMemoryOverflowError)) throw error;
         ctx.ui.notify(error.message, "warning");
         return { cancel: true };
       }
       omContent = renderSummary(projection.reflections, projection.observations);
       omDetails = projection.details;
+      selection = { version: 1, config: selectionConfig, reviewedThrough: { ...omRuntime.cursors } };
       omHasContent = projection.reflections.length > 0 || projection.observations.length > 0;
     } else {
       omContent = renderSummary([], []);
@@ -737,7 +741,16 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     // non-empty Blackhole summaries retain the existing deterministic path.
     // (renderSummary([], []) always emits the OM recall footer, so the check
     // must not key off footer-inclusive omContent.)
-    const fallbackSummary = summary + "\n\n" + omContent;
+    if (event.signal?.aborted) {
+      omRuntime.lastCompactCancelled = true;
+      return { cancel: true };
+    }
+    const continuity = await loadContinuity?.(ctx);
+    if (event.signal?.aborted) {
+      omRuntime.lastCompactCancelled = true;
+      return { cancel: true };
+    }
+    const fallbackSummary = withContinuity(summary + "\n\n" + omContent, continuity);
     if (summary.trim().length === 0 && !omHasContent) {
       // Returning undefined delegates to Pi's native summarizer:
       // ExtensionHandler permits void, and pi only acts on result?.compaction.
@@ -763,7 +776,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
         agentSelectedIds,
         firstKeptEntryId,
       );
-      const aggregateSummary = stripRecallNotes(stripOMContent(summary)).trim();
+      const aggregateSummary = stripContinuity(stripRecallNotes(stripOMContent(summary))).trim();
       const hasPriorCompaction = branchEntries.some((entry) => entry.type === "compaction");
       const hasCompletePreviousSummary =
         !hasPriorCompaction || Boolean(preparation.previousSummary);
@@ -781,9 +794,10 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
           const result = buildAppendOnlyDetails({
             branchEntries: branchEntries as any[],
             manualRebase: isPiVcc,
-            freshSummary: freshSegmentSummary,
+            freshSummary: stripContinuity(freshSegmentSummary),
             aggregateSummary,
             trailingSummary,
+            leadingSummary: continuity?.text,
             currentCoverage,
             tokensBefore: preparation.tokensBefore,
             sections: legacyDetails.sections,
@@ -828,7 +842,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
     return {
       compaction: {
         summary: fallbackSummary,
-        details: { ...details, "om.folded": omDetails },
+        details: { ...details, "om.folded": omDetails, [OM_SELECTION]: selection, "context-forge.continuity": continuity ? { ...continuity, text: undefined } : undefined },
         tokensBefore: preparation.tokensBefore,
         firstKeptEntryId,
       },

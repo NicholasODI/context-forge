@@ -18,6 +18,7 @@ import { captureRegisteredProviderStreams } from "./blackhole/src/om/provider-st
 import { installHostInlineCompactionAdapter } from "./blackhole/src/om/inline-compaction.ts";
 import { registerConsolidationTrigger } from "./blackhole/src/om/consolidation.ts";
 import { registerCompactionTrigger } from "./blackhole/src/om/compaction-trigger.ts";
+import type { ContinuityBlock } from "./blackhole/src/core/continuity.ts";
 import { registerBeforeCompactHook } from "./blackhole/src/hooks/before-compact.ts";
 import { registerCompactFailedHook } from "./blackhole/src/hooks/compact-failed.ts";
 import { registerCompactionContextHook } from "./blackhole/src/hooks/compaction-context.ts";
@@ -52,6 +53,7 @@ export async function registerBlackholeMechanisms(
 	pi: ExtensionAPI,
 	omRuntime: Runtime,
 	mechanisms: BlackholeMechanisms,
+	loadContinuity?: (ctx: ExtensionContext) => Promise<ContinuityBlock | undefined>,
 ): Promise<void> {
 	// Resolve the host AgentSession identity before this returns so the inline
 	// compaction adapter patches the right class. Reload-idempotent; fails
@@ -76,7 +78,7 @@ export async function registerBlackholeMechanisms(
 		registerConsolidationTrigger(pi, omRuntime, mechanisms);
 	}
 	if (mechanisms.vccCompaction) {
-		registerBeforeCompactHook(pi, omRuntime);
+		registerBeforeCompactHook(pi, omRuntime, loadContinuity);
 		registerCompactionTrigger(pi, omRuntime);
 		registerCompactFailedHook(pi, omRuntime);
 		registerCompactionContextHook(pi, omRuntime);

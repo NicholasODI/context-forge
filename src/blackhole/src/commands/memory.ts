@@ -2,7 +2,7 @@
  * /blackhole-memory command — shows memory pipeline status and content.
  *
  * Created by pi-vcc-om. Replaces OM's standalone /om-status and /om-view.
- * Usage: /blackhole-memory [status|view|full]
+ * Usage: /blackhole-memory [status|view|full|diagnostics]
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { copyTextToClipboard } from "../om/clipboard.ts";
@@ -31,6 +31,7 @@ import {
   type Entry,
   type Projection,
 } from "../om/ledger/index.ts";
+import { memoryDiagnostics, renderMemoryDiagnostics } from "../om/ledger/diagnostics.js";
 import { readPendingState } from "../om/pending.ts";
 import { reflectionAccumulatedTokens } from "../om/consolidation.js";
 import { dropTargetTokens } from "../om/agents/dropper/selection.js";
@@ -125,12 +126,26 @@ function renderContentOnlyProjection(
 export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void {
   pi.registerCommand("blackhole-memory", {
     description:
-      "Show memory pipeline status & token counters. /blackhole-memory [view] visible observations & reflections, [full] complete recorded memory (copies to clipboard).",
+      "Show memory pipeline status & token counters. /blackhole-memory diagnostics explains selection. [view] visible observations & reflections, [full] complete recorded memory (copies to clipboard).",
     handler: async (args, ctx) => {
       runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
       const entries = ctx.sessionManager.getBranch() as Entry[];
       const sessionId = ctx.sessionManager.getSessionId();
       const mode = firstArg(args);
+
+      if (mode === "diagnostics") {
+        const raw = Array.isArray(args) ? args.join(" ") : typeof args === "string" ? args : "";
+        const tokens = raw.trim().split(/\s+/).slice(1);
+        let offset = 0, limit = 10;
+        for (const token of tokens) {
+          const match = /^(offset|limit):(\d+)$/.exec(token);
+          if (!match) throw new Error("Usage: /blackhole-memory diagnostics [offset:N] [limit:1–25]");
+          if (match[1] === "offset") offset = Number(match[2]); else limit = Number(match[2]);
+        }
+        if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw new Error("Invalid diagnostic page; limit is 1–25.");
+        ctx.ui.notify(renderMemoryDiagnostics(memoryDiagnostics(entries, runtime.lastMemoryContext, sessionId), offset, limit), "info");
+        return;
+      }
 
       // /blackhole-memory full — show full recorded memory + copy to clipboard
       if (mode === "full") {
@@ -162,7 +177,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
 
       // /blackhole-memory (no args) — show status
       if (mode && mode !== "status") {
-        ctx.ui.notify("Usage: /blackhole-memory [status|view|full]", "info");
+        ctx.ui.notify("Usage: /blackhole-memory [status|view|full|diagnostics]", "info");
         return;
       }
 

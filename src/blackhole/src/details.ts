@@ -49,6 +49,8 @@ export interface PiVccCompactionDetailsV2 {
   segment: PiVccSegment;
   /** Current recall note plus current observational-memory projection. */
   trailingSummary: string;
+  /** Current bounded task prefix, replaced at each compaction. */
+  leadingSummary?: string;
   sections: string[];
   sourceMessageCount: number;
   previousSummaryUsed: boolean;
@@ -72,6 +74,7 @@ export function isPiVccCompactionDetailsV2(value: unknown): value is PiVccCompac
     value.summaryMode !== "append" ||
     typeof value.chainStart !== "boolean" ||
     typeof value.trailingSummary !== "string" ||
+    (value.leadingSummary !== undefined && typeof value.leadingSummary !== "string") ||
     !isStringArray(value.sections) ||
     !Number.isInteger(value.sourceMessageCount) ||
     (value.sourceMessageCount as number) < 1 ||

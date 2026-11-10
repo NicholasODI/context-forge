@@ -64,6 +64,52 @@ events change future projections and worker inputs; they do not rewrite a
 summary already sent. Project task/decision notes provide the separate live
 reminder before and after compaction and are shared by sessions in that project.
 
+### Continuity prefix and memory-use diagnostics
+
+When project memory is enabled and trusted, each Blackhole compaction prepends
+one bounded Resume Context block from the current saved task. It includes task
+status, evidence freshness, goal, up to two blockers, the next two actions, and
+recent progress. It makes no model call, does not infer a task from missing data,
+and creates no project files. `project_memory set_task` accepts a `blockers` list;
+older notes without that field remain readable. Supply the complete lists when
+replacing the task.
+
+The prefix is kept below 3,200 characters by clipping individual fields; complete
+notes remain accessible through `project_memory`. Previous prefixes are stripped
+before deterministic summary merging. Append mode persists only the newest
+prefix in the mutable `leadingSummary` field, ahead of immutable segments; the
+complete fallback summary carries it too. Stale/unverified evidence, completed
+tasks, and notes shared from another session do not authorize resuming old work.
+
+Use `/blackhole-memory diagnostics [offset:N] [limit:1–25]` to inspect the latest
+snapshot. The report shows summary selection, estimated rendered costs,
+importance, pin state, current active state, and these exclusion reasons:
+
+- `budget`: eligible but omitted by ranked token selection.
+- `outside-boundary`: outside that compaction's eligible history slice.
+- `dropped` or `policy-inactive`: removed from the active view by pruning or an
+  explicit correction (including dependent reflections).
+- `after-snapshot`: recorded since the latest snapshot, or before any compaction.
+- `unknown`: historical selection cannot be reconstructed safely.
+
+`included` means selected in the persisted summary snapshot. Selection is
+reconstructed using the configuration and branch at that compaction, rather than
+today's settings. Old snapshots lacking selection metadata still work, but may
+have unknown exclusion reasons. A pin or correction after a compaction can change
+current active state while the old summary still contains the prior record.
+
+Stage cursors now retain completion timestamps for recorded/empty results and
+the report captures them with coverage anchors at each new compaction. A no-op
+stage check can complete without a model call; these are not claim-verification
+timestamps. Legacy cursors have unknown completion times.
+
+When a matching session/compaction has passed through the context projection
+hook, diagnostics also show which exact memory lines and continuity prefix were
+observed there. This observation is ephemeral, disappears on reload, and is
+reported unavailable for unrecognized host message shapes. It does **not** prove
+provider-wire delivery or model attention. Diagnostic failures do not interrupt
+the context path, and the report makes no worker/model calls.
+
 ## Conservative pruning
 
 The dropper cannot remove pinned or critical observations. Each proposed drop
@@ -127,6 +173,8 @@ compatibility for every version or factual recall quality across hundreds of
 real model calls. Reload/restart the installed extension to pick up changes.
 
 Provider-specific tokenization, persistent search indexes, and measured
-cross-model recall-quality benchmarks remain future work. A finite summary
+cross-model recall-quality results remain future work. The new
+[offline benchmark and optional answer scorer](../benchmarks/README.md) separate
+deterministic retention measurements from actual model answers. A finite summary
 still selects a working set: archive retention and pinning reduce repeated
 compaction loss, but cannot guarantee model attention or perfect recall.

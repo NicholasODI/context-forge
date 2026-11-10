@@ -51,6 +51,7 @@ export interface BuildAppendOnlyDetailsInput {
   freshSummary: string;
   aggregateSummary: string;
   trailingSummary: string;
+  leadingSummary?: string;
   currentCoverage: PiVccSegmentCoverage;
   tokensBefore: number;
   sections: string[];
@@ -509,6 +510,7 @@ export function buildAppendOnlyDetails(input: BuildAppendOnlyDetailsInput): {
     chainStart,
     segment,
     trailingSummary: input.trailingSummary,
+    ...(input.leadingSummary ? { leadingSummary: input.leadingSummary } : {}),
     sections: input.sections,
     sourceMessageCount: input.currentCoverage.sourceMessageCount,
     previousSummaryUsed: input.previousSummaryUsed,
@@ -599,6 +601,7 @@ export function projectAppendOnlyContext(
 
   return [
     ...messages.slice(0, fallbackIndex),
+    ...(latest.details.leadingSummary ? [{ role: "compactionSummary", summary: latest.details.leadingSummary, tokensBefore: 0, timestamp: timestampOf(latest, 0) }] : []),
     ...segmentMessages,
     ...tailMessages,
     ...messages.slice(fallbackIndex + 1),

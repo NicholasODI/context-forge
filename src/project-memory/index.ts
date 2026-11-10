@@ -6,6 +6,9 @@ import {
   memoryView, reminderRecords,
 } from "./store.ts";
 
+import { renderContinuity } from "./continuity.ts";
+import type { ContinuityBlock } from "../blackhole/src/core/continuity.ts";
+
 const stringList = { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 2000 } };
 // Plain JSON Schema avoids callable-TypeBox interop under native omp/jiti.
 export const PROJECT_MEMORY_SCHEMA = {
@@ -22,6 +25,7 @@ export const PROJECT_MEMORY_SCHEMA = {
     status: { type: "string", enum: ["active", "blocked", "done"] },
     progress: stringList,
     nextSteps: stringList,
+    blockers: stringList,
     files: { ...stringList, description: "Project-relative evidence files; their actual SHA-256 hashes are captured." },
     checks: { ...stringList, description: "Checks actually performed, including their outcome. Recorded claims only; this tool does not execute checks." },
     sources: { ...stringList, description: "Source references such as session entry IDs, user decisions, URLs, or commit IDs; not independently verified." },
@@ -31,7 +35,7 @@ export const PROJECT_MEMORY_SCHEMA = {
 
 type MemoryMessage = AgentMessage & { contextForgeProjectMemory?: boolean };
 
-export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: ExtensionContext) => boolean): { registerContext: () => void } {
+export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: ExtensionContext) => boolean): { registerContext: () => void; loadContinuity: (ctx: ExtensionContext) => Promise<ContinuityBlock | undefined> } {
   const permitted = (ctx: ExtensionContext) => {
     if (!enabled(ctx)) throw new Error("Project memory is disabled by context-forge configuration.");
     if (!ctx.isProjectTrusted()) throw new Error("Project memory requires a trusted project.");
@@ -75,6 +79,18 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
 
   let registered = false;
   return {
+    async loadContinuity(ctx) {
+      if (!enabled(ctx) || !ctx.isProjectTrusted()) return undefined;
+      try {
+        const root = await projectRoot(ctx.cwd);
+        const state = await readMemory(root);
+        if (!state?.task) return undefined;
+        return renderContinuity(state, await assessFreshness(root, state, [state.task]));
+      } catch (error) {
+        ctx.ui.notify(`Continuity note unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        return undefined;
+      }
+    },
     // Register after VCC's context projection so it cannot discard this live
     // reminder. Never append it to session history or advance OM cursors.
     registerContext() {

@@ -61,7 +61,7 @@ export function createContextForgeExtension(
 				observationalMemory: config.observationalMemory,
 				vccCompaction: config.vccCompaction,
 				unifiedRecall: config.unifiedRecall,
-			});
+			}, projectMemory.loadContinuity);
 			projectMemory.registerContext();
 		});
 	};

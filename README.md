@@ -81,6 +81,7 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 |---|---|
 | `/blackhole` | Manual compact with structural summary. Subcommands: `[settings]` config overlay, `[changelog]`, `[cleanup]`, `[om-off]`/`[om-on]`. |
 | `/blackhole-memory` | Memory pipeline status & token counters. `[view]` visible observations/reflections, `[full]` complete recorded memory (copies to clipboard). |
+| `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Page with `offset:N limit:1–25`. |
 | `/blackhole-export` | Export distilled project memory to markdown. `[out:<path>]` — defaults to project cwd. |
 | `/blackhole-recall` | Search session history. `<query> [page:N] [scope:all] [mode:file\|touched]`. |
 
@@ -100,7 +101,7 @@ explicit project state. It does **not** change worker thresholds, the memory
 ledger, or compaction. No files are created until the agent calls the
 `project_memory` tool to write a record in a trusted project.
 
-To start, ask: **“Record our current goal, completed progress, and next steps in
+To start, ask: **“Record our current goal, completed progress, blockers, and next steps in
 project memory. Record important decisions with their rationale and evidence.”**
 The agent should update it after meaningful progress, not on every tool call.
 This feature supplies storage and tool guidance; it does not infer decisions or
@@ -125,7 +126,7 @@ or declaring evidence valid again.
 The tool supports `read`, `set_task`, `record_decision`, `verify`, `invalidate`,
 `supersede`, `pin`, and `unpin`. Read first; each mutation requires `expectedRevision` to avoid
 overwriting another session's updates. `set_task` replaces the current task;
-include its complete progress and next-step lists. Decision IDs are returned by
+include its complete progress, blocker, and next-step lists. Decision IDs are returned by
 the tool; superseding retains the original in the full log and transfers its pin.
 Reads return bounded previews: use `offset` and `limit` (default 5, maximum 10)
 to page decisions newest first, or `id` to inspect one record. Responses contain
@@ -141,6 +142,7 @@ Example tool arguments after an initial `read` reports revision 0:
   "status": "active",
   "progress": ["Identified the session identity mismatch"],
   "nextSteps": ["Implement the fix", "Run the isolated regression"],
+  "blockers": [],
   "files": ["src/blackhole/src/om/runtime.ts"],
   "sources": ["User requested observer/reflector reliability"]
 }
@@ -177,6 +179,16 @@ the full history remains on disk. The reminder is not appended to the session
 transcript, and is rebuilt after compaction and resume. It supplies reference
 data, not authorization to start an old task. In untrusted projects or with
 `"projectMemory": false` in `context-forge.json`, it is not loaded.
+
+Blackhole compaction also places a bounded **Resume Context** block at the start
+of its summary when a saved task is available. It includes the goal, blockers,
+next action, progress, and freshly assessed evidence status. It is deterministic,
+replaced at each compaction, and respects `projectMemory` and project trust.
+Stale, completed, and cross-session notes remain reference data, not new tasks.
+This works in both normal and append-summary modes.
+
+Run `npm run benchmark:memory` for three isolated 300-compaction retention
+profiles and optional model-recall probes. See [the benchmark guide](benchmarks/README.md).
 
 Concurrent writers use a lock and revision checks. If a process crashes leaving
 `.context-forge/write.lock`, inspect whether another writer is active before

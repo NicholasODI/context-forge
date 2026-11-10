@@ -79,6 +79,8 @@ export interface PipelineCursor {
   activePoolSignature?: string;
   /** Completed reflector input identity, including successful empty reviews. */
   reviewSignature?: string;
+  /** Completion of this stage check, including legitimate no-op results. */
+  completedAt?: string;
 }
 
 export interface PipelineCursors {
@@ -287,6 +289,8 @@ export class Runtime {
   private generation = 0;
   private sessionIdentity: string | undefined;
   private disposed = false;
+  lastMemoryContext?: import("./ledger/diagnostics.js").ContextObservation;
+
   private lifecycleController = new AbortController();
   private compactionTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -301,7 +305,7 @@ export class Runtime {
     // A new session gets a fresh notice collection so the previous session's
     // dedupe cannot suppress the new session's first announcements. Same-id
     // repeats keep the collection (per-run reset stays on agent_start).
-    if (this.sessionIdentity !== sessionIdentity) this.resetNoticeGate();
+    if (this.sessionIdentity !== sessionIdentity) { this.resetNoticeGate(); this.lastMemoryContext = undefined; }
     if (this.sessionIdentity !== undefined && this.sessionIdentity !== sessionIdentity) {
       this.lifecycleController.abort();
       this.lifecycleController = new AbortController();
@@ -1038,6 +1042,7 @@ export class Runtime {
     reviewSignature?: string,
   ): void {
     const cursor: PipelineCursor = { entryId, state };
+    if (state === "recorded" || state === "empty") cursor.completedAt = new Date().toISOString();
     if (activePoolSignature) cursor.activePoolSignature = activePoolSignature;
     if (reviewSignature) cursor.reviewSignature = reviewSignature;
     this.cursors[stage] = cursor;
@@ -1052,12 +1057,14 @@ export class Runtime {
         this.cursors.observer = {
           entryId: stored.observer.entryId,
           state: stored.observer.state as CursorState,
+          ...(typeof stored.observer.completedAt === "string" && Number.isFinite(Date.parse(stored.observer.completedAt)) ? { completedAt: stored.observer.completedAt } : {}),
         };
       }
       if (stored.reflector?.entryId && stored.reflector?.state) {
         this.cursors.reflector = {
           entryId: stored.reflector.entryId,
           state: stored.reflector.state as CursorState,
+          ...(typeof stored.reflector.completedAt === "string" && Number.isFinite(Date.parse(stored.reflector.completedAt)) ? { completedAt: stored.reflector.completedAt } : {}),
           ...(typeof stored.reflector.reviewSignature === "string" && /^[a-f0-9]{64}$/.test(stored.reflector.reviewSignature) ? { reviewSignature: stored.reflector.reviewSignature } : {}),
         };
       }
@@ -1066,6 +1073,7 @@ export class Runtime {
         this.cursors.dropper = {
           entryId: stored.dropper.entryId,
           state: stored.dropper.state as CursorState,
+          ...(typeof stored.dropper.completedAt === "string" && Number.isFinite(Date.parse(stored.dropper.completedAt)) ? { completedAt: stored.dropper.completedAt } : {}),
           ...(typeof activePoolSignature === "string" && activePoolSignature
             ? { activePoolSignature }
             : {}),

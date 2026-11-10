@@ -6,6 +6,7 @@
  * - threads touchMessages/cwd into buildSections for file-touch attribution
  *   (src/extract/file-touch.ts); merge logic otherwise unchanged.
  */
+import { stripContinuity } from "./continuity.js";
 import type { Message } from "@earendil-works/pi-ai";
 import type { FileOps } from "../types";
 import { normalize } from "./normalize";
@@ -405,7 +406,7 @@ export const compile = (input: CompileInput): string => {
   // matching. Order matters: OM sections appear before the recall note in the
   // stored summary, so we must remove them first to avoid leaving the recall
   // stripper with fragments.
-  let prev = input.previousSummary ? stripOMContent(input.previousSummary) : undefined;
+  let prev = input.previousSummary ? stripOMContent(stripContinuity(input.previousSummary)) : undefined;
   prev = prev ? stripRecallNotes(prev) : undefined;
   const merged = prev ? mergePrevious(prev, fresh) : fresh;
   if (!merged) return "";

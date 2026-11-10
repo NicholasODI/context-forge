@@ -1,0 +1,206 @@
+{
+  "version": 1,
+  "mode": "offline-synthetic",
+  "providerCalls": 0,
+  "scope": "Deterministic selection/continuity and source recall. Worker semantics, provider overhead, native omp, and model attention are not measured.",
+  "profiles": [
+    {
+      "profile": "tight-8k",
+      "cycles": 300,
+      "declaredWindow": 8192,
+      "metrics": {
+        "pinnedHits": 600,
+        "pinnedChecks": 600,
+        "correctedHits": 226,
+        "correctedChecks": 226,
+        "staleLeaks": 0,
+        "budgetViolations": 0,
+        "prefixViolations": 0,
+        "staleActionLeaks": 0,
+        "archiveRecovered": 5,
+        "archiveChecks": 5,
+        "pruned": 871,
+        "maxSummaryTokens": 1355,
+        "estimatedSummaryFitsWindow": true,
+        "finalSelectedRecords": 22,
+        "hostCompactionMessages": 1,
+        "exposedProbes": 5,
+        "totalProbes": 6
+      },
+      "probes": [
+        {
+          "id": "port",
+          "question": "What is the deployment port?",
+          "expected": "43179",
+          "exposed": true
+        },
+        {
+          "id": "checksum",
+          "question": "What is the checksum invariant identifier?",
+          "expected": "OAK-731",
+          "exposed": true
+        },
+        {
+          "id": "transport",
+          "question": "Which transport is currently required?",
+          "expected": "UNIX-NEW",
+          "forbidden": "TCP-OLD",
+          "exposed": true
+        },
+        {
+          "id": "retry",
+          "question": "What was the historical retry budget?",
+          "expected": "17",
+          "exposed": false
+        },
+        {
+          "id": "next",
+          "question": "What is the next recorded action?",
+          "expected": "NEW-NEXT-ACTION-902",
+          "exposed": true
+        },
+        {
+          "id": "decision",
+          "question": "Which source-evidence decision identifier must be retained?",
+          "expected": "EVIDENCE-552",
+          "exposed": true
+        }
+      ],
+      "modelRecall": {
+        "status": "not-run"
+      }
+    },
+    {
+      "profile": "local-32k",
+      "cycles": 300,
+      "declaredWindow": 32768,
+      "metrics": {
+        "pinnedHits": 600,
+        "pinnedChecks": 600,
+        "correctedHits": 226,
+        "correctedChecks": 226,
+        "staleLeaks": 0,
+        "budgetViolations": 0,
+        "prefixViolations": 0,
+        "staleActionLeaks": 0,
+        "archiveRecovered": 5,
+        "archiveChecks": 5,
+        "pruned": 871,
+        "maxSummaryTokens": 2146,
+        "estimatedSummaryFitsWindow": true,
+        "finalSelectedRecords": 50,
+        "hostCompactionMessages": 1,
+        "exposedProbes": 5,
+        "totalProbes": 6
+      },
+      "probes": [
+        {
+          "id": "port",
+          "question": "What is the deployment port?",
+          "expected": "43179",
+          "exposed": true
+        },
+        {
+          "id": "checksum",
+          "question": "What is the checksum invariant identifier?",
+          "expected": "OAK-731",
+          "exposed": true
+        },
+        {
+          "id": "transport",
+          "question": "Which transport is currently required?",
+          "expected": "UNIX-NEW",
+          "forbidden": "TCP-OLD",
+          "exposed": true
+        },
+        {
+          "id": "retry",
+          "question": "What was the historical retry budget?",
+          "expected": "17",
+          "exposed": false
+        },
+        {
+          "id": "next",
+          "question": "What is the next recorded action?",
+          "expected": "NEW-NEXT-ACTION-902",
+          "exposed": true
+        },
+        {
+          "id": "decision",
+          "question": "Which source-evidence decision identifier must be retained?",
+          "expected": "EVIDENCE-552",
+          "exposed": true
+        }
+      ],
+      "modelRecall": {
+        "status": "not-run"
+      }
+    },
+    {
+      "profile": "local-131k",
+      "cycles": 300,
+      "declaredWindow": 131072,
+      "metrics": {
+        "pinnedHits": 600,
+        "pinnedChecks": 600,
+        "correctedHits": 226,
+        "correctedChecks": 226,
+        "staleLeaks": 0,
+        "budgetViolations": 0,
+        "prefixViolations": 0,
+        "staleActionLeaks": 0,
+        "archiveRecovered": 5,
+        "archiveChecks": 5,
+        "pruned": 870,
+        "maxSummaryTokens": 3449,
+        "estimatedSummaryFitsWindow": true,
+        "finalSelectedRecords": 72,
+        "hostCompactionMessages": 1,
+        "exposedProbes": 6,
+        "totalProbes": 6
+      },
+      "probes": [
+        {
+          "id": "port",
+          "question": "What is the deployment port?",
+          "expected": "43179",
+          "exposed": true
+        },
+        {
+          "id": "checksum",
+          "question": "What is the checksum invariant identifier?",
+          "expected": "OAK-731",
+          "exposed": true
+        },
+        {
+          "id": "transport",
+          "question": "Which transport is currently required?",
+          "expected": "UNIX-NEW",
+          "forbidden": "TCP-OLD",
+          "exposed": true
+        },
+        {
+          "id": "retry",
+          "question": "What was the historical retry budget?",
+          "expected": "17",
+          "exposed": true
+        },
+        {
+          "id": "next",
+          "question": "What is the next recorded action?",
+          "expected": "NEW-NEXT-ACTION-902",
+          "exposed": true
+        },
+        {
+          "id": "decision",
+          "question": "Which source-evidence decision identifier must be retained?",
+          "expected": "EVIDENCE-552",
+          "exposed": true
+        }
+      ],
+      "modelRecall": {
+        "status": "not-run"
+      }
+    }
+  ]
+}
