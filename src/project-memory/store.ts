@@ -32,6 +32,7 @@ export interface Task extends MemoryRecord {
   status: "active" | "blocked" | "done";
   progress: string[];
   nextSteps: string[];
+  blockers?: string[];
 }
 export interface ProjectMemory {
   version: 1;
@@ -47,6 +48,7 @@ export interface MemoryChange {
   status?: Task["status"];
   progress?: string[];
   nextSteps?: string[];
+  blockers?: string[];
   files?: string[];
   checks?: string[];
   sources?: string[];
@@ -127,7 +129,7 @@ export async function readMemory(root: string): Promise<ProjectMemory | null> {
       !Array.isArray(state.decisions) || !state.decisions.every(validRecord) ||
       !(state.task === null || (validRecord(state.task) && object(state.task) && state.task.id === "task" &&
         ["active", "blocked", "done"].includes(String(state.task.status)) &&
-        [state.task.progress, state.task.nextSteps].every(a => Array.isArray(a) && a.every(s => typeof s === "string"))))) {
+        [state.task.progress, state.task.nextSteps, state.task.blockers ?? []].every(a => Array.isArray(a) && a.every(s => typeof s === "string"))))) {
     fail("unsupported or malformed memory.json; refusing to overwrite it");
   }
   const memory = state as unknown as ProjectMemory;
@@ -201,7 +203,7 @@ function validateChange(change: MemoryChange): void {
   if (["verify", "invalidate", "supersede", "pin", "unpin"].includes(change.action)) text(change.id, "id", 100);
   if (change.action === "invalidate") text(change.reason, "reason");
   if (change.status !== undefined && !["active", "blocked", "done"].includes(change.status)) fail("invalid task status");
-  for (const key of ["progress", "nextSteps", "files", "checks", "sources"] as const) {
+  for (const key of ["progress", "nextSteps", "blockers", "files", "checks", "sources"] as const) {
     if (change[key] !== undefined) strings(change[key], key);
   }
 }
@@ -233,7 +235,7 @@ async function save(root: string, state: ProjectMemory): Promise<void> {
   const taskDoc = `${header}\n# Current task\n\n${task ? [
     task.text, `\nStatus: ${task.status}; evidence: ${freshness.get(task.id)?.status ?? "unverified"}`,
     "\n## Progress", ...task.progress.map(s => `- ${s}`), "\n## Next steps", ...task.nextSteps.map(s => `- ${s}`),
-    "\n## Evidence", ...evidenceLines(task), ...(task.invalidated ? [`Invalidated: ${task.invalidated}`] : []),
+    "\n## Blockers", ...(task.blockers ?? []).map(s => `- ${s}`), "\n## Evidence", ...evidenceLines(task), ...(task.invalidated ? [`Invalidated: ${task.invalidated}`] : []),
   ].join("\n") : "No task recorded."}\n`;
   const decisionsDoc = `${header}\n# Decision log\n\n${state.decisions.map(d => [
     `## ${d.id} — ${freshness.get(d.id)?.status ?? (d.supersededBy ? "superseded" : d.invalidated ? "stale" : "unverified")}`, d.text, `Updated: ${d.updatedAt}`,
@@ -269,7 +271,7 @@ export async function updateMemory(root: string, change: MemoryChange, sessionId
     const now = new Date().toISOString();
     const existing = change.id === "task" ? state.task : state.decisions.find(d => d.id === change.id);
     if (change.action === "set_task") {
-      state.task = { id: "task", text: change.text!, status: change.status ?? "active", progress: change.progress ?? [], nextSteps: change.nextSteps ?? [], updatedAt: now, evidence };
+      state.task = { id: "task", text: change.text!, status: change.status ?? "active", progress: change.progress ?? [], nextSteps: change.nextSteps ?? [], blockers: change.blockers ?? [], updatedAt: now, evidence };
     } else if (change.action === "record_decision" || change.action === "supersede") {
       if (change.action === "supersede" && (!existing || existing.id === "task" || existing.supersededBy)) fail("supersede requires an active decision ID");
       const id = `d-${state.revision + 1}`;
@@ -328,7 +330,7 @@ export async function memoryView(root: string, state: ProjectMemory, options: { 
     id: r.id, text: clip(r.text, record ? 2000 : 400), updatedAt: r.updatedAt,
     pinned: r.pinned ?? false, invalidated: r.invalidated, supersededBy: r.supersededBy,
     freshness: freshness.get(r.id),
-    ...(r.id === "task" ? { status: state.task!.status, progress: state.task!.progress.slice(-3).map(s => clip(s, 300)), nextSteps: state.task!.nextSteps.slice(0, 3).map(s => clip(s, 300)) } : {}),
+    ...(r.id === "task" ? { status: state.task!.status, progress: state.task!.progress.slice(-3).map(s => clip(s, 300)), nextSteps: state.task!.nextSteps.slice(0, 3).map(s => clip(s, 300)), blockers: (state.task!.blockers ?? []).slice(0, 3).map(s => clip(s, 300)) } : {}),
     evidence: r.evidence ? {
       recordedAt: r.evidence.recordedAt, sessionId: r.evidence.sessionId,
       files: r.evidence.files.slice(0, 3).map(f => ({ path: clip(f.path, 150), sha256: f.sha256 })),
@@ -361,7 +363,11 @@ export function renderReminder(state: ProjectMemory, freshness: Map<string, Fres
   if (state.task) {
     const t = state.task;
     lines.push(`Task (${t.status}; ${freshness.get("task")?.status ?? "unverified"}): ${short(t.text, 1000)}`);
-    lines.push(...t.progress.slice(-4).map(s => `Progress: ${short(s)}`), ...t.nextSteps.slice(0, 4).map(s => `Next: ${short(s)}`));
+    lines.push(...t.progress.slice(-4).map(s => `Progress: ${short(s)}`));
+    if (t.status !== "done" && !t.invalidated && !t.supersededBy) {
+      lines.push(...(t.blockers ?? []).slice(0, 2).map(s => `Blocker: ${short(s, 250)}`));
+      lines.push(...t.nextSteps.slice(0, 4).map(s => `Next: ${short(s)}`));
+    } else lines.push("No next action for this completed/invalidated task.");
   }
   const active = state.decisions.filter(d => !d.supersededBy && !d.invalidated);
   for (const d of reminderRecords(state).filter(d => d.id !== "task")) {

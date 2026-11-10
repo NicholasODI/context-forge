@@ -39,6 +39,8 @@ export type CompactionProjectionConfig = {
 
 export type CompactionProjection = Projection & {
   fullFold: boolean;
+  /** Eligible records before token selection; not persisted as duplicate content. */
+  candidates: Projection;
   details: MemoryDetails;
 };
 
@@ -271,6 +273,8 @@ export function buildCompactionProjection(
     };
   }
 
+  const candidates = projection;
+
   // Output limits are independent of stored-token full-fold maintenance.
   // Source records stay in the branch; raw/view callers can omit finite caps.
   if (config.observationsPoolMaxTokens > 0 && Number.isFinite(config.observationsPoolMaxTokens)) {
@@ -305,6 +309,7 @@ export function buildCompactionProjection(
 
   return {
     fullFold,
+    candidates,
     observations: projection.observations,
     reflections: projection.reflections,
     details,

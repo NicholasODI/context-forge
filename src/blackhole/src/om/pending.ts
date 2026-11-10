@@ -87,9 +87,9 @@ export interface PendingOMState {
   unanchoredBatches?: PendingUnanchored[];
   /** Pipeline progress cursors — persist across restarts and fork recovery. */
   cursors?: {
-    observer?: { entryId: string; state: string };
-    reflector?: { entryId: string; state: string; reviewSignature?: string };
-    dropper?: { entryId: string; state: string; activePoolSignature?: string };
+    observer?: { entryId: string; state: string; completedAt?: string };
+    reflector?: { entryId: string; state: string; completedAt?: string; reviewSignature?: string };
+    dropper?: { entryId: string; state: string; completedAt?: string; activePoolSignature?: string };
   };
 }
 

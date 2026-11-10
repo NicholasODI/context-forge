@@ -5,6 +5,7 @@ import {
   isRetainedToolOutputProjection,
 } from "../core/tool-output-budget.js";
 import { isPiVccCompactionDetailsV2 } from "../details.js";
+import { observeMemoryContext } from "../om/ledger/diagnostics.js";
 import { debugLog } from "../om/debug-log.js";
 import type { Runtime } from "../om/runtime.js";
 
@@ -14,6 +15,14 @@ export function registerCompactionContextHook(pi: ExtensionAPI, runtime: Runtime
     runtime.ensureConfig(ctx.cwd ?? process.cwd());
     const dbg = (ev: string, data?: Record<string, unknown>) =>
       debugLog(ev, data, runtime.config.debugLog === true);
+    const observe = (messages: any[], entries: any[]) => {
+      try {
+        runtime.lastMemoryContext = observeMemoryContext(messages, entries, ctx.sessionManager.getSessionId());
+      } catch {
+        // Optional diagnostics must never break the provider's context path.
+        runtime.lastMemoryContext = undefined;
+      }
+    };
     let branchEntries: any[];
     let projected: any[] = event.messages;
     let latest: any;
@@ -22,6 +31,7 @@ export function registerCompactionContextHook(pi: ExtensionAPI, runtime: Runtime
       latest = findLatestCompactionEntry(branchEntries);
       projected = projectAppendOnlyContext(projected, branchEntries);
     } catch (error) {
+      runtime.lastMemoryContext = undefined;
       // Keep Pi's complete fallback summary if the projection cannot be built.
       dbg("compaction_context.projection_failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -30,6 +40,7 @@ export function registerCompactionContextHook(pi: ExtensionAPI, runtime: Runtime
     }
 
     if (isPiVccCompactionDetailsV2(latest?.details) && projected === event.messages) {
+      observe(projected, branchEntries);
       return;
     }
 
@@ -48,6 +59,7 @@ export function registerCompactionContextHook(pi: ExtensionAPI, runtime: Runtime
       }
     }
 
+    observe(projected, branchEntries);
     return projected === event.messages ? undefined : { messages: projected };
   });
 }

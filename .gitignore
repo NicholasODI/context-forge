@@ -7,3 +7,6 @@ dist/
 .omp/
 context-forge.json
 blackhole-config.json
+
+# Reproducible synthetic benchmark outputs / optional supplied-answer scores
+benchmarks/results/
