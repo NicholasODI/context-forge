@@ -29,6 +29,7 @@ import {
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
 import { maxDropCountForPool, selectDropCandidates, dropTargetTokens, attachDropEvidence, type DropEvidence, type DropSelection } from "./agents/dropper/selection.js";
+import { dropEligibility, relevantDropperReflections, planDropperBatches, dropperContextSummary } from "./agents/dropper/planning.js";
 import {
   coverageTierForObservation,
   observationToDropperLine,
@@ -335,8 +336,10 @@ function activePoolSignature(entries: Entry[], pending: PendingOMState | undefin
     observations: observations.map(o => [o.id, o.relevance, o.pinned ?? false]).sort(),
     reflections: livePoolReflections(entries, pending).filter(r => r.supportingObservationIds.some(id => ids.has(id)))
       .map(r => [r.id, r.content, [...r.supportingObservationIds].sort()]).sort(),
-    budgets: [config.observationsPoolMaxTokens, config.observationsPoolTargetTokens, config.reflectionsPoolMaxTokens],
-    policyVersion: 2,
+    budgets: [config.observationsPoolMaxTokens, config.observationsPoolTargetTokens, config.dropperInputMaxTokens],
+    model: config.dropperModel ?? config.model,
+    fallbacks: config.dropperFallbackModels,
+    policyVersion: 3,
   })).digest("hex");
 }
 
@@ -2566,10 +2569,11 @@ function computeDropperInput(
   // below: the per-item cost is the dispatched dropper line, whose coverage
   // tier comes from this same reflection set.
   const availableReflections = livePoolReflections(entries, pending, sameRunReflections);
-  const reflectionsForDropper = runtime.config.reflectionsPoolMaxTokens > 0
-    ? selectPriorReflections(availableReflections, runtime.config.reflectionsPoolMaxTokens) : availableReflections;
+  const eligibility = dropEligibility(newObservations, availableReflections);
+  const eligibleObservations = eligibility.eligible;
+  const reflectionsForDropper = relevantDropperReflections(eligibleObservations, availableReflections);
   const coverageById = reflectionCoverageMap(newObservations, reflectionsForDropper);
-  const dropperNewObsTokens = newObservations.reduce(
+  const dropperNewObsTokens = eligibleObservations.reduce(
     // Rendered dropper lines, not bare content: the agent sends
     // observationToDropperLine per candidate, and the fit-check must price
     // what is dispatched (see planPrefixBatches).
@@ -2580,12 +2584,8 @@ function computeDropperInput(
       ),
     0,
   );
-  const dropperSummaryBudget = Math.floor(runtime.config.dropperInputMaxTokens * 0.2);
-  // Deliberately uncapped: the prompt carries every candidate observation, so
-  // this has to be the size that will actually be sent — capping it at
-  // dropperInputMaxTokens would hide an oversized pressure prompt from the
-  // context-window check below and hand it to a model that cannot hold it.
-  const dropperInputTokens = dropperNewObsTokens + dropperSummaryBudget;
+  // Candidate/proof bundles are measured whole; the worker cap is applied
+  // jointly during batching rather than silently trimming replacement evidence.
   // Adjust accumulated for pending coverage in manual mode
   let effectiveDropTokens = dropTokens;
   if (isManualMode(runtime.config)) {
@@ -2597,18 +2597,19 @@ function computeDropperInput(
   // Existing active observations summary for context (capped).
   // In manual mode, merge accumulated pending batches with
   // branch data (preserving pre-switch markers).
-  const sourceObsForDropper = pending
-    ? [...folded.activeObservations, ...pendingBufferedObservations(pending)]
-    : folded.activeObservations;
-  const existingObservationsSummary = buildExistingObservationsSummary(
-    sourceObsForDropper.filter((o: any) => !newObservations.some((no: any) => no.id === o.id)),
+  const sourceObsForDropper = livePoolObservations(entries, pending);
+  const existingObservationsSummary = dropperContextSummary(
+    sourceObsForDropper.filter((o: any) => !eligibleObservations.some((no: any) => no.id === o.id)),
     Math.floor(runtime.config.dropperInputMaxTokens * 0.2),
   );
   const summaryTokens = estimateStringTokens(existingObservationsSummary);
+  const dropperInputTokens = dropperNewObsTokens + summaryTokens + reflectionsForDropper.reduce((sum, r) => sum + estimateStringTokens(reflectionToDropperLine(r)), 0);
   return {
     folded,
     pending,
     newObservations,
+    eligibleObservations,
+    eligibility,
     dropperNewObsTokens,
     dropperInputTokens,
     effectiveDropTokens,
@@ -2726,14 +2727,20 @@ export async function runDropperStage(
     pressurePending,
   );
   const dropperStaticTokens = await workerStaticPromptTokens("dropper");
-  // Reflections travel whole in every prompt (normal and batched), so they
-  // ride in the estimated input alongside the candidates — mirroring the
-  // reflector's newItemsTokens, which prices both. All terms price the
-  // dispatched rendering with the same CJK-aware estimator as the static side.
+  // Full-run evidence is measured for normal dispatch. Batches carry only
+  // their own candidates and all relevant proofs under the same cost basis.
   const dropperReflectionsTokens = input.reflectionsForDropper.reduce(
     (s: number, r: any) => s + estimateStringTokens(reflectionToDropperLine(r)),
     0,
   );
+
+  const poolTokens = input.newObservations.reduce((sum, o) => sum + observationRenderedTokens(o), 0);
+  const globalMaxDrops = Math.min(input.eligibleObservations.length, maxDropCountForPool(
+    input.newObservations, poolTokens, runtime.config.observationsPoolMaxTokens,
+    runtime.config.dropperPoolFullnessThreshold, runtime.config.observationsPoolTargetTokens,
+  ));
+  debugLog("dropper.eligibility", { ...input.eligibility.counts, tokens: input.eligibility.tokens,
+    providedReflectionCount: input.reflectionsForDropper.length, poolTokens, maxDropsAllowed: globalMaxDrops, scope: pressureRun ? "pressure-pool" : "cadence-delta" });
 
   // Shared commit tail: normal and batched runs both advance the cursor at
   // most once, after all work for this invocation is done.
@@ -2774,6 +2781,11 @@ export async function runDropperStage(
         pressureReached ? pressurePoolSignature : undefined,
       );
     }
+    const selectedIds = new Set(data?.observationIds ?? []);
+    const selectedRenderedTokens = input.newObservations.filter(o => selectedIds.has(o.id)).reduce((sum, o) => sum + observationRenderedTokens(o), 0);
+    debugLog("dropper.committed", { selectedDropsCount: selectedIds.size, selectedRenderedTokens,
+      scope: pressureRun ? "pressure-pool" : "cadence-delta", scopeTokensBefore: poolTokens,
+      scopeTokensAfter: Math.max(0, poolTokens - selectedRenderedTokens), eligibility: input.eligibility.counts });
     runtime.lastDropperError = undefined;
     return "continue";
   };
@@ -2793,61 +2805,17 @@ export async function runDropperStage(
     const bestModel = best.resolved.model as any;
     const stageModelForBatch =
       best.resolved.source === "candidate" ? best.resolved.candidateConfig : undefined;
-    // Pool-wide pressure basis (stored counts, the same basis the trigger
-    // and the agent use): every batch quotes these numbers.
-    const poolTokens = input.newObservations.reduce(
-      (s: number, o: any) => s + observationRenderedTokens(o),
-      0,
-    );
-    const globalMaxDrops = maxDropCountForPool(
-      input.newObservations,
-      poolTokens,
-      runtime.config.observationsPoolMaxTokens,
-      runtime.config.dropperPoolFullnessThreshold,
-      runtime.config.observationsPoolTargetTokens,
-    );
-    // Fast path: nothing in the pool is droppable (all-critical, or an
-    // under-target cadence delta). Commit the empty result without spending
-    // model calls — batching a no-drop pool would only re-prove the cap.
-    // This binds no model-dependent verdict: globalMaxDrops derives from the
-    // pool and config alone (stored counts, pool budget, threshold), never
-    // from a window, so a later larger model cannot change it — only a pool
-    // change (new signature) re-arms the run.
-    if (globalMaxDrops <= 0) return commitDropperResult(undefined);
-    const batchFixedOverhead =
-      input.summaryTokens +
-      dropperReflectionsTokens +
-      dropperStaticTokens +
-      WORKER_TURN_HEADROOM_TOKENS;
-    const batchBudget = workerInputBudget(best.ctx, bestModel, runtime.config.workerOutputMaxTokens);
-    const itemBudget = batchBudget - batchFixedOverhead;
-    if (itemBudget <= 0) return "abort";
-    // Priced as dispatched dropper lines against the pool-wide coverage map
-    // (the per-batch agent map agrees per id: tiers derive from reflections
-    // alone), so a certified batch cannot overflow at runtime.
-    const batchCoverageById = reflectionCoverageMap(
-      input.newObservations,
-      input.reflectionsForDropper,
-    );
-    const batchItemTokens = (o: any) =>
-      estimateStringTokens(
-        observationToDropperLine(o, coverageTierForObservation(o, batchCoverageById), input.reflectionsForDropper),
-      );
-    const batches = planPrefixBatches(input.newObservations, batchItemTokens, itemBudget);
-    if (input.newObservations.length > 0) {
-      // Every batch must fit: a single huge candidate anywhere in the pool
-      // would otherwise send an over-window batch, fail at runtime, and void
-      // the whole run into an identical retry every cycle. Abort upfront.
-      const oversized = batches.find(
-        (batch) =>
-          batch.reduce((s, o) => s + batchItemTokens(o), 0) + batchFixedOverhead > batchBudget,
-      );
-      if (oversized) return "abort";
+    const batchFixedOverhead = input.summaryTokens + dropperStaticTokens + WORKER_TURN_HEADROOM_TOKENS;
+    const batchBudget = Math.min(runtime.config.dropperInputMaxTokens,
+      workerInputBudget(best.ctx, bestModel, runtime.config.workerOutputMaxTokens));
+    const batches = planDropperBatches(input.eligibleObservations, input.reflectionsForDropper, batchBudget - batchFixedOverhead);
+    if (!batches) {
+      runtime.recordConsolidationStageError(ctx, "dropper", new Error(
+        "Dropper candidate and its replacement evidence cannot fit the worker input budget; coverage unchanged. Increase dropperInputMaxTokens or use a larger worker context.",
+      ));
+      return "abort";
     }
-    const planned = batches.length > 0 ? batches : [[] as typeof input.newObservations];
-    // The [[]] fallback only fires on an empty pool; the empty batch is
-    // skipped below, matching the single-run path. Kept rather than
-    // early-returning so the cap check and commit logic stay single-pathed.
+    const planned = batches.map(batch => batch.observations);
     // Bounded by design (see WORKER_SHRINK_MAX_BATCHES): past the cap the
     // pass aborts upfront with the cursor unmoved instead of burning a worker
     // call per batch and still advancing nothing.
@@ -2855,15 +2823,15 @@ export async function runDropperStage(
       debugLog("dropper.batch_cap", {
         batchCount: planned.length,
         maxBatches: WORKER_SHRINK_MAX_BATCHES,
-        candidateCount: input.newObservations.length,
+        candidateCount: input.eligibleObservations.length,
         model: `${bestModel.provider}/${bestModel.id}`,
       });
       runtime.tryEmitWorkerInfo(
         ctx.hasUI,
         ctx.ui,
-        `Observational memory: dropper deferring ${input.newObservations.length} candidates ` +
+        `Observational memory: dropper deferring ${input.eligibleObservations.length} candidates ` +
           `(${planned.length} fit-to-window batches exceeds the per-run limit of ${WORKER_SHRINK_MAX_BATCHES}; ` +
-          `a larger dropper model would clear the pool)`,
+          `a larger worker input budget/context may permit a complete review)`,
       );
       return "abort";
     }
@@ -2872,13 +2840,13 @@ export async function runDropperStage(
     debugLog("dropper.batch_plan", {
       batchCount: planned.length,
       batchSizes: planned.map((b) => b.length),
-      candidateCount: input.newObservations.length,
+      candidateCount: input.eligibleObservations.length,
       model: `${bestModel.provider}/${bestModel.id}`,
     });
     runtime.tryEmitWorkerInfo(
       ctx.hasUI,
       ctx.ui,
-      `Observational memory: dropper batching ${input.newObservations.length} candidates into ${planned.length} fit-to-window batches on ${bestModel.provider}/${bestModel.id}`,
+      `Observational memory: dropper batching ${input.eligibleObservations.length} candidates into ${planned.length} fit-to-window batches on ${bestModel.provider}/${bestModel.id}`,
     );
     const seen = new Set<string>();
     const mergedProposals: string[] = [];
@@ -2915,7 +2883,7 @@ export async function runDropperStage(
         debugLog("dropper.batch_cap", {
           batchRuns,
           maxBatches: WORKER_SHRINK_MAX_BATCHES,
-          candidateCount: input.newObservations.length,
+          candidateCount: input.eligibleObservations.length,
           model: `${bestModel.provider}/${bestModel.id}`,
         });
         return "abort";
@@ -2938,11 +2906,11 @@ export async function runDropperStage(
               apiKey: best.resolved.apiKey,
               headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
               env: best.resolved.env,
-              reflections: input.reflectionsForDropper,
+              reflections: relevantDropperReflections(batch, input.reflectionsForDropper),
               observations: batch,
               existingObservationsSummary: input.existingObservationsSummary || undefined,
               budgetTokens: runtime.config.observationsPoolMaxTokens,
-            targetTokens: runtime.config.observationsPoolTargetTokens,
+              targetTokens: runtime.config.observationsPoolTargetTokens,
               skipFullness: runtime.config.dropperPoolFullnessThreshold,
               pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
               rawProposals: true,
@@ -3001,6 +2969,8 @@ export async function runDropperStage(
     return commitDropperResult(selected.length > 0 ? attachDropEvidence(selected, mergedProofs) : undefined);
   };
 
+  if (globalMaxDrops <= 0) return commitDropperResult(undefined);
+
   // Largest-window model resolved so far (shrink target) and whether any
   // attempt ran a model and failed (which keeps error semantics owning the
   // outcome — the shrink pass only triggers on a pure size-mismatch record).
@@ -3049,7 +3019,10 @@ export async function runDropperStage(
       input.summaryTokens +
       dropperStaticTokens +
       WORKER_TURN_HEADROOM_TOKENS;
-    const dropperInputBudget = workerInputBudget(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
+    const dropperInputBudget = Math.min(runtime.config.dropperInputMaxTokens, workerInputBudget(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens));
+    if (dropperEstimatedInput > dropperInputBudget && dropperEstimatedInput <= workerInputBudget(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens)) {
+      return runShrunkBatches({ resolved, ctx: effectiveDropCtx });
+    }
     if (dropperEstimatedInput > dropperInputBudget) {
       debugLog("dropper.context_window_exceeded", {
         estimatedInput: dropperEstimatedInput,
@@ -3101,10 +3074,11 @@ export async function runDropperStage(
             env: resolved.env,
             maxOutputTokens: workerOutputAllowance(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens),
             reflections: input.reflectionsForDropper,
-            observations: input.newObservations,
+            observations: input.eligibleObservations,
+            pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
             existingObservationsSummary: input.existingObservationsSummary || undefined,
             budgetTokens: runtime.config.observationsPoolMaxTokens,
-              targetTokens: runtime.config.observationsPoolTargetTokens,
+            targetTokens: runtime.config.observationsPoolTargetTokens,
             skipFullness: runtime.config.dropperPoolFullnessThreshold,
             maxTurns: runtime.config.agentMaxTurns,
             thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),

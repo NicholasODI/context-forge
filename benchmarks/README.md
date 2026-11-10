@@ -26,6 +26,10 @@ shared-hash seed reflection, with
 periodic synthetic pruning proposals. All original source records stay in the
 branch as in the extension's append-only ledger.
 
+Fixture version 3 uses the focused continuation renderer and mirrors the live
+hook's replacement of the persisted prefix with one fresh handoff. It does not
+count two copies of the same task note as additional model context.
+
 Measurements are separate:
 
 | Measurement | What it establishes |

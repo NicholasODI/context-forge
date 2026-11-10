@@ -18,7 +18,7 @@ import {
   stripOMContent,
   stripRecallNotes,
 } from "../core/summarize";
-import { stripContinuity, withContinuity, type ContinuityBlock } from "../core/continuity.js";
+import { stripContinuity, withContinuity, focusSummary, type ContinuityBlock } from "../core/continuity.js";
 import { buildAppendOnlyDetails, coverageForMessages } from "../core/compaction-chain.js";
 import { getModelProvider, matchesSkippedProvider } from "../core/provider-skip.js";
 import type { PiVccCompactionDetails } from "../details";
@@ -599,7 +599,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
     // Git working-tree tags for fresh-window annotations; empty (no
     // annotations) outside a repo or if git fails.
     const gitTags = loadGitFileTags(ctx.cwd ?? process.cwd());
-    const summary = compile({
+    let summary = compile({
       messages,
       previousSummary: preparation.previousSummary,
       fileOps,
@@ -608,7 +608,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
       cwd: ctx.cwd ?? process.cwd(),
       gitTags,
     });
-    const freshSegmentSummary =
+    let freshSegmentSummary =
       omRuntime.config.compactionSummaryMode === "append"
         ? compileSegment({
             messages,
@@ -697,6 +697,13 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
       pendingCount: retainedToolOutputProjection.pendingCount,
     });
 
+    const hadStructuralSummary = summary.trim().length > 0;
+    if (event.signal?.aborted) { omRuntime.lastCompactCancelled = true; return { cancel: true }; }
+    const continuity = await loadContinuity?.(ctx);
+    if (event.signal?.aborted) { omRuntime.lastCompactCancelled = true; return { cancel: true }; }
+    summary = focusSummary(summary, continuity);
+    if (freshSegmentSummary) freshSegmentSummary = focusSummary(freshSegmentSummary, continuity);
+
     const legacyDetails: PiVccCompactionDetails = {
       compactor: "blackhole",
       version: 1,
@@ -745,13 +752,8 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
       omRuntime.lastCompactCancelled = true;
       return { cancel: true };
     }
-    const continuity = await loadContinuity?.(ctx);
-    if (event.signal?.aborted) {
-      omRuntime.lastCompactCancelled = true;
-      return { cancel: true };
-    }
     const fallbackSummary = withContinuity(summary + "\n\n" + omContent, continuity);
-    if (summary.trim().length === 0 && !omHasContent) {
+    if (!hadStructuralSummary && !omHasContent) {
       // Returning undefined delegates to Pi's native summarizer:
       // ExtensionHandler permits void, and pi only acts on result?.compaction.
       trace("before_compact.native_fallback", {

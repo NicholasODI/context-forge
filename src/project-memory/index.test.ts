@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerProjectMemory, PROJECT_MEMORY_SCHEMA } from "./index";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 
 let root: string;
 beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "forge-hook-test-")); });
@@ -25,14 +26,48 @@ function host(enabled = true, trusted = true) {
   const registration = registerProjectMemory(pi, () => enabled);
   registration.registerContext();
   registration.registerContext();
-  return { ctx, tool, command, context: handlers.get("context")! };
+  return { ctx, tool, command, handlers, context: handlers.get("context")! };
 }
 
 describe("main-session project memory integration", () => {
+  it("attaches explicit host metadata receipts without auto-writing task state or claiming expected tests ran", async () => {
+    const { ctx, tool, handlers, context } = host();
+    const event = { toolName: "bash", toolCallId: "check-call", input: { command: "TOKEN=TOP_SECRET_VALUE npm test" } };
+    await handlers.get("tool_call")!(event, ctx);
+    await handlers.get("tool_result")!({ ...event, isError: false, structuredContent: { exit_code: 0, output: "raw private output TOP_SECRET_VALUE" } }, ctx);
+    const read = await tool.execute("read", { action: "read", section: "checks" }, undefined, undefined, ctx);
+    const receipt = JSON.parse(read.content[0].text).receipts[0];
+    await expect(readFile(join(root, ".context-forge/memory.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await tool.execute("write", { action: "set_task", expectedRevision: 0, text: "Current task", checkIds: [receipt.id] }, undefined, undefined, ctx);
+    const source = await readFile(join(root, ".context-forge/memory.json"), "utf8");
+    expect(source).not.toContain("TOP_SECRET_VALUE");
+    expect(source).not.toContain("raw private output");
+    expect(JSON.stringify(await context({ messages: [] }, ctx))).toContain("expected tests executed=unknown");
+  });
+  it("replaces the persisted handoff with one live view and keeps the fallback on storage errors", async () => {
+    const { ctx, tool, context } = host();
+    await tool.execute("save", { action: "set_task", expectedRevision: 0, text: "Focused task" }, undefined, undefined, ctx);
+    const { renderContinuity } = await import("./continuity");
+    const { readMemory } = await import("./store");
+    const block = renderContinuity((await readMemory(root))!, new Map())!;
+    const original = [{ role: "compactionSummary", summary: block.text + "\n\n[Files And Changes]\n- proof.ts", tokensBefore: 100, timestamp: 1 }] as any;
+    const once = await context({ messages: original }, ctx);
+    expect(JSON.stringify(once.messages)).not.toContain("context-forge:continuity:start");
+    expect(JSON.stringify(once.messages).match(/focused continuation/g)).toHaveLength(1);
+    expect(once.messages[0].summary).toContain("proof.ts");
+    const twice = await context(once, ctx);
+    expect(twice.messages).toHaveLength(2);
+    await writeFile(join(root, ".context-forge/memory.json"), "broken");
+    expect(await context({ messages: original }, ctx)).toBeUndefined(); // original complete summary retained
+    expect(original[0].summary).toContain("context-forge:continuity:start");
+  });
   it("ships serializable plain JSON schema", () => {
     const schema = JSON.parse(JSON.stringify(PROJECT_MEMORY_SCHEMA));
     expect(schema.type).toBe("object");
     expect(schema.properties.action.enum).toContain("set_task");
+    const tool: any = { name: "project_memory", parameters: PROJECT_MEMORY_SCHEMA };
+    expect(validateToolArguments(tool, { name: "project_memory", arguments: { action: "update_task", expectedRevision: 1, pendingGoalChange: null, reason: "User clarified" } } as any).pendingGoalChange).toBeNull();
+    expect(() => validateToolArguments(tool, { name: "project_memory", arguments: { action: "set_task", expectedRevision: 0, text: "Task", provenance: { kind: "tool_observed", source: "model claim" } } } as any)).toThrow();
   });
 
   it("creates nothing during normal context requests or read-only status", async () => {
@@ -75,6 +110,11 @@ describe("main-session project memory integration", () => {
     const { ctx, tool, context } = host(enabled, trusted);
     await expect(tool.execute("write", { action: "set_task", expectedRevision: 0, text: "No write" }, undefined, undefined, ctx)).rejects.toThrow();
     expect(await context({ messages: [] }, ctx)).toBeUndefined();
+    const { CONTINUITY_START, CONTINUITY_END } = await import("../blackhole/src/core/continuity");
+    const messages = [{ role: "compactionSummary", summary: `${CONTINUITY_START}\nSaved private project objective\n${CONTINUITY_END}\n\n[Files And Changes]\n- retained.ts` }];
+    const result = await context({ messages }, ctx);
+    expect(result.messages[0].summary).toBe("[Files And Changes]\n- retained.ts");
+    expect(messages[0].summary).toContain("Saved private project objective"); // projection only
     await expect(readFile(join(root, ".context-forge/memory.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 

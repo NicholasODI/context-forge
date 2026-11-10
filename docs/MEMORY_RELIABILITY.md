@@ -93,11 +93,14 @@ reminder before and after compaction and are shared by sessions in that project.
 
 When project memory is enabled and trusted, each Blackhole compaction prepends
 one bounded Resume Context block from the current saved task. It includes task
-status, evidence freshness, goal, up to two blockers, the next two actions, and
+status, evidence freshness, goal, up to two blockers, one next action, and
 recent progress. It makes no model call, does not infer a task from missing data,
 and creates no project files. `project_memory set_task` accepts a `blockers` list;
 older notes without that field remain readable. Supply the complete lists when
 replacing the task.
+
+The focused continuation lifecycle, attribution, scoped evidence and bounded
+handoff diagnostics are documented in [CONTINUATION_STATE.md](CONTINUATION_STATE.md).
 
 The prefix is kept below 3,200 characters by clipping individual fields; complete
 notes remain accessible through `project_memory`. Previous prefixes are stripped
@@ -165,6 +168,39 @@ pruning: below the effective target, no pruning call is needed; selection stops
 once enough safe proposed records meet the target. Safety vetoes, count caps,
 or missing replacement coverage can leave the pool above target. Full evidence
 remains archived regardless of summary selection.
+
+The main-model `reflectionsPoolMaxTokens` budget does **not** cap dropper proof
+availability. The worker considers active-ledger reflections that cite eligible
+observations, including references omitted from the latest main summary. Only
+unprotected observations with citation coverage go to the model as candidates;
+optional read-only context is separately bounded. Structural eligibility alone
+does not establish safe equivalence or require a drop.
+
+A replacement reference remains stored and recallable; pruning does not pin it
+or force it into the budget-limited main summary. Source retention and live
+context inclusion remain separate. Explicitly pin facts that must stay in the
+working context, and keep that protected core within its output budgets.
+
+`dropperInputMaxTokens` and the resolved worker context bound the joint input:
+candidate text, every relevant provided proof, static instructions/tool schema,
+read-only context, and turn headroom. Larger candidate sets use bounded batches
+with only their relevant reflections. Shared proof is charged once per batch;
+a single oversized proof bundle defers the run without advancing coverage.
+Selections/proofs merge globally and commit once after all batches succeed. A
+later failed batch cannot publish earlier partial drops. This can use several
+existing dropper requests while catching up; it adds no new worker type.
+
+`/blackhole-memory` reports a **Drop eligibility** line with citation-eligible,
+protected, and uncovered record/token counts across the active ledger. Large
+protected/uncovered totals can prevent reaching the pruning target even when
+the worker works correctly. Debug event `dropper.eligibility` gives the actual
+run scope and evidence counts. `dropper.committed` records the final selection
+and rendered token reduction; per-batch `dropper.result` can report raw proposals
+with zero selected until that global commit. New `selectedDropTokens` values use
+rendered costs; `selectedDropContentTokens` preserves the content-only figure
+used by older result logs. Old empty verdicts are rechecked after this policy
+upgrade, new evidence, or changes to relevant pool/worker budgets or configured
+worker models. These controls do not force removals to meet a quota.
 
 ## Local worker settings
 
