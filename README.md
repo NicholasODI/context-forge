@@ -81,7 +81,7 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 |---|---|
 | `/blackhole` | Manual compact with structural summary. Subcommands: `[settings]` config overlay, `[changelog]`, `[cleanup]`, `[om-off]`/`[om-on]`. |
 | `/blackhole-memory` | Memory pipeline status & token counters. `[view]` visible observations/reflections, `[full]` complete recorded memory (copies to clipboard). |
-| `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Page with `offset:N limit:1–25`. |
+| `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Filter with `id:MEMORY_ID`; page with `offset:N limit:1–25`. Includes drop-marker provenance. |
 | `/blackhole-export` | Export distilled project memory to markdown. `[out:<path>]` — defaults to project cwd. |
 | `/blackhole-recall` | Search session history. `<query> [page:N] [scope:all] [mode:file\|touched]`. |
 

@@ -106,7 +106,7 @@ prefix in the mutable `leadingSummary` field, ahead of immutable segments; the
 complete fallback summary carries it too. Stale/unverified evidence, completed
 tasks, and notes shared from another session do not authorize resuming old work.
 
-Use `/blackhole-memory diagnostics [offset:N] [limit:1–25]` to inspect the latest
+Use `/blackhole-memory diagnostics [id:MEMORY_ID] [offset:N] [limit:1–25]` to inspect the latest
 snapshot. The report shows summary selection, estimated rendered costs,
 importance, pin state, current active state, and these exclusion reasons:
 
@@ -127,6 +127,21 @@ Stage cursors now retain completion timestamps for recorded/empty results and
 the report captures them with coverage anchors at each new compaction. A no-op
 stage check can complete without a model call; these are not claim-verification
 timestamps. Legacy cursors have unknown completion times.
+
+Observations and reflections can share a content hash when their text is
+identical. Folding and diagnostics keep their shapes, importance, inclusion,
+active state, and context evidence separate by record kind. Stored IDs are not
+rewritten. Existing `memory_policy` events are ID-scoped: if both kinds match an
+ID, explicit pin/unpin/invalidate/supersede actions affect both; derived
+reflection invalidation does not remove an independent observation of that hash.
+
+Diagnostics show the first persisted drop marker, its write timestamp when
+available, and recorded replacement proof. Critical observations with drop
+markers are counted for inspection. These markers can predate current guards;
+the report does not automatically restore or rewrite historical drops. Use an
+ID filter to inspect all record kinds with that hash without paging the whole
+history. After a folding fix, an old snapshot may no longer reconstruct exactly;
+unknown exclusion reasons remain unknown rather than being fabricated.
 
 When a matching session/compaction has passed through the context projection
 hook, diagnostics also show which exact memory lines and continuity prefix were

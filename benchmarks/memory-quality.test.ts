@@ -9,6 +9,7 @@ it("measures retention separately from model recall across three 300-compaction 
     expect(m.pinnedHits).toBe(m.pinnedChecks);
     expect(m.correctedHits).toBe(m.correctedChecks);
     expect(m.staleLeaks + m.budgetViolations + m.prefixViolations + m.staleActionLeaks).toBe(0);
+    expect(m.recordShapeViolations + m.criticalTagViolations).toBe(0);
     expect(m.archiveRecovered).toBe(m.archiveChecks);
     expect(m.pruned).toBeGreaterThan(0);
     expect(m.hostCompactionMessages).toBe(1);
