@@ -37,6 +37,7 @@ import {
   isDeterministicError,
   withDiscardedCount,
   WorkerStreamError,
+  WorkerProtocolError,
   workerStreamErrorMessage,
 } from "../../retryable-error.js";
 
@@ -295,6 +296,7 @@ export async function runObserver(args: RunObserverArgs): Promise<ObserverResult
           },
         ],
         details: { added, duplicates, rejected, complete: params.complete },
+        terminate: params.complete === true && rejected === 0,
       };
     },
   };
@@ -424,7 +426,7 @@ ${conversation}`;
   // classification, and a `length` terminal carrying a deterministic (4xx)
   // message keeps its provider-error classification — the cap did not cause it.
   if (
-    turnCap?.exhausted &&
+    (turnCap?.exhausted || (!agentError && !closedByCompleteBatch)) &&
     accumulated.size > 0 &&
     !closedByCompleteBatch &&
     !signal?.aborted &&
@@ -481,6 +483,11 @@ ${conversation}`;
   }
 
   if (accumulated.size === 0) {
+    if (!closedByCompleteBatch) {
+      throw new WorkerProtocolError(
+        `Observer did not complete coverage: ${!toolCalled ? "record_observations was not called" : totalRejected > 0 ? "proposals were rejected" : "no valid complete=true close"}`,
+      );
+    }
     // Determine why no observations were recorded
     let emptyReason: ObserverEmptyReason;
     if (!toolCalled) {

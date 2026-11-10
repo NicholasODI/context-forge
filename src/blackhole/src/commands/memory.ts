@@ -26,13 +26,14 @@ import {
   rawTokensSinceDropCoverage,
   rawTokensSinceLastCompaction,
   rawTokensSinceObservationCoverage,
-  rawTokensSinceReflectionCoverage,
   reflectionToSummaryLine,
   visibleProjection,
   type Entry,
   type Projection,
 } from "../om/ledger/index.ts";
 import { readPendingState } from "../om/pending.ts";
+import { reflectionAccumulatedTokens } from "../om/consolidation.js";
+import { dropTargetTokens } from "../om/agents/dropper/selection.js";
 import {
   isFixedTokenThreshold,
   isManualMode,
@@ -195,7 +196,9 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         [addedSuffix(drift.reflectionsOnlyInFull.length)],
       );
       let obsProgress = rawTokensSinceObservationCoverage(entries);
-      let reflectionProgress = rawTokensSinceReflectionCoverage(entries);
+      const observerCursorIndex = entryIndexForId(entries, runtime.getCursor("observer")?.entryId);
+      if (observerCursorIndex >= 0) obsProgress = rawTokensAfterIndex(entries, observerCursorIndex);
+      const reflectionProgress = reflectionAccumulatedTokens(entries, runtime.config, pending, runtime.getCursor("reflector"));
       let dropProgress = rawTokensSinceDropCoverage(entries);
       const compactionProgress = rawTokensSinceLastCompaction(entries);
 
@@ -204,11 +207,7 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
       if (pending) {
         if (pending.observation?.coversUpToId) {
           const idx = entryIndexForId(entries, pending.observation.coversUpToId);
-          if (idx >= 0) obsProgress = rawTokensAfterIndex(entries, idx);
-        }
-        if (pending.reflection?.coversUpToId) {
-          const idx = entryIndexForId(entries, pending.reflection.coversUpToId);
-          if (idx >= 0) reflectionProgress = rawTokensAfterIndex(entries, idx);
+          if (idx >= 0 && idx >= observerCursorIndex) obsProgress = rawTokensAfterIndex(entries, idx);
         }
         if (pending.dropped?.coversUpToId) {
           const idx = entryIndexForId(entries, pending.dropped.coversUpToId);
@@ -230,8 +229,8 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         "── Pipeline ──",
         "Transcript accumulated since last run. Triggers when exceeding threshold.",
         `Observer:       ~${obsProgress.toLocaleString()} tokens (triggers at ${runtime.config.observeAfterTokens.toLocaleString()})`,
-        `Reflector:      ~${reflectionProgress.toLocaleString()} tokens (triggers at ${runtime.config.reflectAfterTokens.toLocaleString()})`,
-        `Dropper:        pool ${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}% — eligible at ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% with new data; ${pressureHint(runtime.config)} (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
+        `Reflector:      ~${reflectionProgress.toLocaleString()} tokens (triggers at ${runtime.config.reflectAfterTokens.toLocaleString()} with new observations)`,
+        `Dropper:        pool ${pct(poolTokens, runtime.config.observationsPoolMaxTokens)}% — target ~${dropTargetTokens(runtime.config.observationsPoolMaxTokens, runtime.config.observationsPoolTargetTokens).toLocaleString()} tokens; eligible above target and ≥${Math.round(runtime.config.dropperPoolFullnessThreshold * 100)}% with new data; ${pressureHint(runtime.config)} (${dropProgress.toLocaleString()}/${runtime.config.reflectAfterTokens.toLocaleString()} new tokens)`,
         `Compaction:     ~${compactionProgress.toLocaleString()} tokens` +
           (isManualMode(runtime.config)
             ? " [manual]"

@@ -26,6 +26,7 @@ export interface MemoryRecord {
   evidence: Evidence | null;
   invalidated?: string;
   supersededBy?: string;
+  pinned?: boolean;
 }
 export interface Task extends MemoryRecord {
   status: "active" | "blocked" | "done";
@@ -39,7 +40,7 @@ export interface ProjectMemory {
   decisions: MemoryRecord[];
 }
 export interface MemoryChange {
-  action: "set_task" | "record_decision" | "verify" | "invalidate" | "supersede";
+  action: "set_task" | "record_decision" | "verify" | "invalidate" | "supersede" | "pin" | "unpin";
   expectedRevision: number;
   id?: string;
   text?: string;
@@ -73,6 +74,7 @@ function validRecord(value: unknown): value is MemoryRecord {
   if (!object(value) || typeof value.id !== "string" || typeof value.text !== "string" || typeof value.updatedAt !== "string") return false;
   if (value.invalidated !== undefined && typeof value.invalidated !== "string") return false;
   if (value.supersededBy !== undefined && typeof value.supersededBy !== "string") return false;
+  if (value.pinned !== undefined && typeof value.pinned !== "boolean") return false;
   if (value.evidence === null) return true;
   const e = value.evidence;
   return object(e) && typeof e.recordedAt === "string" && typeof e.sessionId === "string" &&
@@ -164,10 +166,11 @@ async function capture(root: string, change: MemoryChange, sessionId: string): P
   };
 }
 
-export async function assessFreshness(root: string, state: ProjectMemory): Promise<Map<string, Freshness>> {
+export async function assessFreshness(root: string, state: ProjectMemory, records?: MemoryRecord[]): Promise<Map<string, Freshness>> {
   const current = await repository(root);
   const result = new Map<string, Freshness>();
-  for (const record of [...(state.task ? [state.task] : []), ...state.decisions]) {
+  const hashes = new Map<string, Promise<string>>();
+  for (const record of records ?? [...(state.task ? [state.task] : []), ...state.decisions]) {
     let value: Freshness = { status: "unverified", reason: "no file evidence or reported checks" };
     if (record.supersededBy) value = { status: "superseded", reason: `replaced by ${record.supersededBy}` };
     else if (record.invalidated) value = { status: "stale", reason: record.invalidated };
@@ -180,7 +183,8 @@ export async function assessFreshness(root: string, state: ProjectMemory): Promi
         }
         for (const file of e.files) {
           try {
-            if (await fileHash(root, file.path) !== file.sha256) value = { status: "stale", reason: `file changed: ${file.path}` };
+            if (!hashes.has(file.path)) hashes.set(file.path, fileHash(root, file.path));
+            if (await hashes.get(file.path) !== file.sha256) value = { status: "stale", reason: `file changed: ${file.path}` };
           } catch { value = { status: "stale", reason: `file unavailable: ${file.path}` }; }
         }
       }
@@ -192,9 +196,9 @@ export async function assessFreshness(root: string, state: ProjectMemory): Promi
 
 function validateChange(change: MemoryChange): void {
   if (!Number.isSafeInteger(change.expectedRevision) || change.expectedRevision < 0) fail("expectedRevision is required; read project_memory first");
-  if (!["set_task", "record_decision", "verify", "invalidate", "supersede"].includes(change.action)) fail("unknown action");
+  if (!["set_task", "record_decision", "verify", "invalidate", "supersede", "pin", "unpin"].includes(change.action)) fail("unknown action");
   if (["set_task", "record_decision", "supersede"].includes(change.action)) text(change.text, "text");
-  if (["verify", "invalidate", "supersede"].includes(change.action)) text(change.id, "id", 100);
+  if (["verify", "invalidate", "supersede", "pin", "unpin"].includes(change.action)) text(change.id, "id", 100);
   if (change.action === "invalidate") text(change.reason, "reason");
   if (change.status !== undefined && !["active", "blocked", "done"].includes(change.status)) fail("invalid task status");
   for (const key of ["progress", "nextSteps", "files", "checks", "sources"] as const) {
@@ -223,16 +227,16 @@ function evidenceLines(record: MemoryRecord): string[] {
 
 async function save(root: string, state: ProjectMemory): Promise<void> {
   const dir = (await directory(root, true))!;
-  const freshness = await assessFreshness(root, state);
-  const header = `${GENERATED}\n\nRevision: ${state.revision}. Freshness below is as of generation; project_memory read recomputes it.\n`;
+  const freshness = await assessFreshness(root, state, reminderRecords(state));
+  const header = `${GENERATED}\n\nRevision: ${state.revision}. Freshness is checked for the bounded working set; other records are unverified here. project_memory read by id recomputes individual evidence.\n`;
   const task = state.task;
   const taskDoc = `${header}\n# Current task\n\n${task ? [
-    task.text, `\nStatus: ${task.status}; evidence: ${freshness.get(task.id)!.status}`,
+    task.text, `\nStatus: ${task.status}; evidence: ${freshness.get(task.id)?.status ?? "unverified"}`,
     "\n## Progress", ...task.progress.map(s => `- ${s}`), "\n## Next steps", ...task.nextSteps.map(s => `- ${s}`),
     "\n## Evidence", ...evidenceLines(task), ...(task.invalidated ? [`Invalidated: ${task.invalidated}`] : []),
   ].join("\n") : "No task recorded."}\n`;
   const decisionsDoc = `${header}\n# Decision log\n\n${state.decisions.map(d => [
-    `## ${d.id} — ${freshness.get(d.id)!.status}`, d.text, `Updated: ${d.updatedAt}`,
+    `## ${d.id} — ${freshness.get(d.id)?.status ?? (d.supersededBy ? "superseded" : d.invalidated ? "stale" : "unverified")}`, d.text, `Updated: ${d.updatedAt}`,
     ...(d.supersededBy ? [`Superseded by: ${d.supersededBy}`] : []),
     ...(d.invalidated ? [`Invalidated: ${d.invalidated}`] : []), ...evidenceLines(d),
   ].join("\n\n")).join("\n\n")}\n`;
@@ -269,11 +273,12 @@ export async function updateMemory(root: string, change: MemoryChange, sessionId
     } else if (change.action === "record_decision" || change.action === "supersede") {
       if (change.action === "supersede" && (!existing || existing.id === "task" || existing.supersededBy)) fail("supersede requires an active decision ID");
       const id = `d-${state.revision + 1}`;
-      state.decisions.push({ id, text: change.text!, updatedAt: now, evidence });
+      state.decisions.push({ id, text: change.text!, updatedAt: now, evidence, ...(existing?.pinned ? { pinned: true } : {}) });
       if (change.action === "supersede") existing!.supersededBy = id;
     } else {
       if (!existing) fail("record not found");
-      if (change.action === "invalidate") existing.invalidated = change.reason;
+      if (change.action === "pin" || change.action === "unpin") existing.pinned = change.action === "pin";
+      else if (change.action === "invalidate") existing.invalidated = change.reason;
       else {
         if (!evidence || (!evidence.files.length && !evidence.checks.length)) fail("verify requires file evidence or reported checks");
         existing.evidence = evidence;
@@ -300,6 +305,51 @@ export async function refreshDocuments(root: string): Promise<ProjectMemory> {
   } finally { await rm(lock, { recursive: true }); }
 }
 
+export function reminderRecords(state: ProjectMemory): MemoryRecord[] {
+  const words = new Set((state.task?.text.toLowerCase().match(/[\p{L}\p{N}_./-]{3,}/gu) ?? []));
+  const score = (record: MemoryRecord, i: number) => (record.pinned ? 1000 : 0) +
+    Math.min(20, [...new Set(record.text.toLowerCase().match(/[\p{L}\p{N}_./-]{3,}/gu) ?? [])].filter(w => words.has(w)).length * 2) + i / Math.max(1, state.decisions.length);
+  const decisions = state.decisions.map((record, i) => ({ record, score: score(record, i) }))
+    .filter(({ record }) => !record.supersededBy && !record.invalidated)
+    .sort((a, b) => b.score - a.score).slice(0, 8).map(x => x.record);
+  return [...(state.task ? [state.task] : []), ...decisions];
+}
+
+/** Bounded JSON on every tool call; the full source is never returned implicitly. */
+export async function memoryView(root: string, state: ProjectMemory, options: { id?: string; offset?: number; limit?: number } = {}): Promise<string> {
+  const offset = options.offset ?? 0, limit = options.limit ?? 5;
+  if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 10) fail("read offset/limit must be nonnegative integers; limit is 1–10");
+  const record = options.id ? (options.id === "task" ? state.task : state.decisions.find(d => d.id === options.id)) : undefined;
+  if (options.id && !record) fail("record not found");
+  const records = record ? [record] : [...(state.task ? [state.task] : []), ...state.decisions.slice().reverse().slice(offset, offset + limit)];
+  const freshness = await assessFreshness(root, state, records);
+  const clip = (s: string, max: number) => s.length <= max ? s : s.slice(0, max) + "…";
+  const summarize = (r: MemoryRecord) => ({
+    id: r.id, text: clip(r.text, record ? 2000 : 400), updatedAt: r.updatedAt,
+    pinned: r.pinned ?? false, invalidated: r.invalidated, supersededBy: r.supersededBy,
+    freshness: freshness.get(r.id),
+    ...(r.id === "task" ? { status: state.task!.status, progress: state.task!.progress.slice(-3).map(s => clip(s, 300)), nextSteps: state.task!.nextSteps.slice(0, 3).map(s => clip(s, 300)) } : {}),
+    evidence: r.evidence ? {
+      recordedAt: r.evidence.recordedAt, sessionId: r.evidence.sessionId,
+      files: r.evidence.files.slice(0, 3).map(f => ({ path: clip(f.path, 150), sha256: f.sha256 })),
+      checks: r.evidence.checks.slice(0, 3).map(s => clip(s, 250)),
+      sources: r.evidence.sources.slice(0, 3).map(s => clip(s, 150)),
+    } : null,
+  });
+  const payload = {
+    root, version: state.version, revision: state.revision, records: records.map(summarize),
+    totalDecisions: state.decisions.length,
+    nextOffset: !record && offset + limit < state.decisions.length ? offset + limit : null,
+    note: "Bounded previews; read by id or page offset. Full evidence/progress lists remain in .context-forge/memory.json; use bounded file reads for omitted details.",
+  };
+  while (JSON.stringify(payload).length > 12000 && payload.records.length > 1) {
+    payload.records.pop();
+    payload.nextOffset = offset + Math.max(0, payload.records.length - (state.task ? 1 : 0));
+  }
+  const json = JSON.stringify(payload, null, 2);
+  return json.length <= 16000 ? json : JSON.stringify({ revision: state.revision, root, note: "Record metadata exceeds the tool budget; use a bounded read of .context-forge/memory.json." });
+}
+
 export function renderReminder(state: ProjectMemory, freshness: Map<string, Freshness>): string {
   const lines = [
     "[context-forge project memory]", `Revision ${state.revision}. Reference data, not a new user request.`,
@@ -307,15 +357,16 @@ export function renderReminder(state: ProjectMemory, freshness: Map<string, Fres
     "Full evidence/history: .context-forge/TASK.md, DECISIONS.md, memory.json. Use project_memory to read/update after meaningful progress.",
   ];
   const short = (s: string, max = 600) => s.length > max ? s.slice(0, max) + "…" : s;
+  if (state.decisions.filter(d => d.pinned && !d.supersededBy && !d.invalidated).length > 8) lines.push("PIN OVERFLOW: more pinned decisions than reminder slots; inspect the log before relying on this abbreviated view.");
   if (state.task) {
     const t = state.task;
     lines.push(`Task (${t.status}; ${freshness.get("task")?.status ?? "unverified"}): ${short(t.text, 1000)}`);
     lines.push(...t.progress.slice(-4).map(s => `Progress: ${short(s)}`), ...t.nextSteps.slice(0, 4).map(s => `Next: ${short(s)}`));
   }
-  const active = state.decisions.filter(d => !d.supersededBy);
-  for (const d of active.slice(-8)) {
+  const active = state.decisions.filter(d => !d.supersededBy && !d.invalidated);
+  for (const d of reminderRecords(state).filter(d => d.id !== "task")) {
     const f = freshness.get(d.id);
-    lines.push(`${d.id} (${f?.status ?? "unverified"}): ${short(d.text)}; ${short(f?.reason ?? "", 120)}`);
+    lines.push(`${d.id}${d.pinned ? " [pinned]" : ""} (${f?.status ?? "unverified"}): ${short(d.text)}; ${short(f?.reason ?? "", 120)}`);
   }
   if (active.length > 8) lines.push(`${active.length - 8} additional decisions omitted; read the log when relevant.`);
   // Character cap, not a claim about a provider-specific tokenizer.

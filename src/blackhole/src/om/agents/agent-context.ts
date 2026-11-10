@@ -15,6 +15,7 @@
 import type { AgentContext, AgentTool } from "@earendil-works/pi-agent-core";
 import type { SystemMessage, Tool } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
+import { WorkerSetupError } from "../retryable-error.js";
 
 /** The pi-ai transcript helpers that exist from Pi 0.87 on. */
 interface TranscriptSupport {
@@ -67,7 +68,7 @@ function isUsableToolParameters(parameters: unknown): parameters is Record<strin
 /** Build the `AgentContext` the loaded host understands. */
 export function buildAgentContext(systemPrompt: string, tools: AgentTool<any>[]): AgentContext {
 	if (typeof systemPrompt !== "string" || systemPrompt.length === 0) {
-		throw new Error(
+		throw new WorkerSetupError(
 			`buildAgentContext: systemPrompt must be a non-empty string, got ` +
 			`${systemPrompt === undefined ? "undefined" : typeof systemPrompt}. ` +
 			`A worker prompt module failed to initialize.`,
@@ -85,7 +86,7 @@ export function buildAgentContext(systemPrompt: string, tools: AgentTool<any>[])
 		if (!isUsableToolParameters(tool.parameters)) {
 			const label =
 				typeof tool.name === "string" && tool.name.length > 0 ? tool.name : "<unnamed tool>";
-			throw new Error(
+			throw new WorkerSetupError(
 				`buildAgentContext: tool "${label}" has no usable parameters schema (got ` +
 				`${tool.parameters === undefined ? "undefined" : typeof tool.parameters}). ` +
 				`A worker tool-definition import failed to initialize.`,

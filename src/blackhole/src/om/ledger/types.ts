@@ -30,6 +30,7 @@ export type Entry = {
 };
 
 export type Observation = {
+  pinned?: boolean;
   id: string;
   content: string;
   timestamp: string;
@@ -39,6 +40,8 @@ export type Observation = {
 };
 
 export type Reflection = {
+  pinned?: boolean;
+  relevance?: Relevance;
   id: string;
   content: string;
   supportingObservationIds: string[];
@@ -68,6 +71,7 @@ export type ReflectionsRecordedEntryData = {
 export type ObservationsDroppedEntryData = {
   observationIds: string[];
   coversUpToId: string;
+  proofs?: Record<string, { reflectionIds: string[]; reason: string }>;
 };
 
 export type MemoryDetails = {

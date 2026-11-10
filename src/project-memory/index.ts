@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   assessFreshness, emptyMemory, projectRoot, readMemory, refreshDocuments,
   renderReminder, updateMemory, type MemoryChange,
+  memoryView, reminderRecords,
 } from "./store.ts";
 
 const stringList = { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 2000 } };
@@ -12,7 +13,9 @@ export const PROJECT_MEMORY_SCHEMA = {
   additionalProperties: false,
   required: ["action"],
   properties: {
-    action: { type: "string", enum: ["read", "set_task", "record_decision", "verify", "invalidate", "supersede"] },
+    action: { type: "string", enum: ["read", "set_task", "record_decision", "verify", "invalidate", "supersede", "pin", "unpin"] },
+    offset: { type: "integer", minimum: 0 },
+    limit: { type: "integer", minimum: 1, maximum: 10 },
     expectedRevision: { type: "integer", minimum: 0, description: "Required for writes; get the current revision with action=read." },
     id: { type: "string", description: "task or a decision ID returned by read." },
     text: { type: "string", minLength: 1, maxLength: 2000, description: "Current task goal, or a decision including its rationale." },
@@ -41,14 +44,13 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
     async execute(_id, raw, _signal, _onUpdate, ctx) {
       permitted(ctx);
       if (!raw || typeof raw !== "object") throw new Error("Project memory arguments must be an object.");
-      const input = raw as unknown as MemoryChange | { action: "read" };
+      const input = raw as unknown as MemoryChange | { action: "read"; id?: string; offset?: number; limit?: number };
       const root = await projectRoot(ctx.cwd);
       const state = input.action === "read"
         ? await readMemory(root) ?? emptyMemory()
         : await updateMemory(root, input, ctx.sessionManager.getSessionId());
-      const freshness = Object.fromEntries(await assessFreshness(root, state));
       return {
-        content: [{ type: "text", text: JSON.stringify({ root, ...state, freshness }, null, 2) }],
+        content: [{ type: "text", text: await memoryView(root, state, input.action === "read" ? input : {}) }],
         details: { root, revision: state.revision },
       };
     },
@@ -63,7 +65,7 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
         const root = await projectRoot(ctx.cwd);
         const state = args.trim() === "refresh" ? await refreshDocuments(root) : await readMemory(root);
         ctx.ui.notify(state
-          ? renderReminder(state, await assessFreshness(root, state))
+          ? renderReminder(state, await assessFreshness(root, state, reminderRecords(state)))
           : "No durable project memory yet. Ask the agent to use project_memory to record the task and next steps.", "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -88,7 +90,7 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
           if (!state) return messages.length === original.length ? undefined : { messages };
           const reminder: MemoryMessage = {
             role: "user",
-            content: [{ type: "text", text: renderReminder(state, await assessFreshness(root, state)) }],
+            content: [{ type: "text", text: renderReminder(state, await assessFreshness(root, state, reminderRecords(state))) }],
             timestamp: Date.now(),
             contextForgeProjectMemory: true,
           };

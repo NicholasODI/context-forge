@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -86,5 +86,36 @@ describe("main-session project memory integration", () => {
     expect(await context({ messages }, ctx)).toBeUndefined();
     expect(messages[0].content).toBe("Keep this");
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("not loaded"), "warning");
+  });
+
+  it("pages a large decision history without returning the full source to the model", async () => {
+    const { ctx, tool } = host();
+    await mkdir(join(root, ".context-forge"));
+    const decisions = Array.from({ length: 600 }, (_, i) => ({
+      id: `d-${i + 1}`, text: `Decision ${i + 1}: ` + "x".repeat(1800), updatedAt: new Date().toISOString(), evidence: null,
+    }));
+    await writeFile(join(root, ".context-forge/memory.json"), JSON.stringify({ version: 1, revision: 600, task: null, decisions }));
+    const first = await tool.execute("read", { action: "read", limit: 5 }, undefined, undefined, ctx);
+    const page = JSON.parse(first.content[0].text);
+    expect(first.content[0].text.length).toBeLessThanOrEqual(16000);
+    expect(page.records).toHaveLength(5);
+    expect(page.nextOffset).toBe(5);
+    expect(page.totalDecisions).toBe(600);
+    const second = JSON.parse((await tool.execute("read", { action: "read", offset: 5, limit: 5 }, undefined, undefined, ctx)).content[0].text);
+    expect(second.records[0].id).not.toBe(page.records[0].id);
+    const detail = JSON.parse((await tool.execute("read", { action: "read", id: "d-1" }, undefined, undefined, ctx)).content[0].text);
+    expect(detail.records).toHaveLength(1);
+    expect(detail.records[0].text).toBe(decisions[0].text);
+  });
+
+  it("keeps an explicitly pinned old decision in the working set", async () => {
+    const { ctx, tool, context } = host();
+    for (let i = 0; i < 12; i++) {
+      await tool.execute("write", { action: "record_decision", expectedRevision: i, text: i === 0 ? "Old invariant: preserve source evidence" : `Recent routine choice ${i}` }, undefined, undefined, ctx);
+    }
+    await tool.execute("pin", { action: "pin", expectedRevision: 12, id: "d-1" }, undefined, undefined, ctx);
+    const result = await context({ messages: [] }, ctx);
+    expect(JSON.stringify(result)).toContain("Old invariant: preserve source evidence");
+    expect(JSON.stringify(result)).toContain("[pinned]");
   });
 });

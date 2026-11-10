@@ -5,6 +5,7 @@
  * Modified: nested snapshots, bounded output, and compact-all coverage.
  */
 import { selectPriorObservations, selectPriorReflections } from "./render-summary.js";
+import { applyMemoryPolicies, OM_MEMORY_POLICY } from "./policy.js";
 import {
   OM_FOLDED,
   isMemoryDetails,
@@ -33,6 +34,7 @@ export type CompactionProjectionConfig = {
   observationsPoolMaxTokens: number;
   reflectionsPoolMaxTokens?: number;
   fullFoldAlways?: boolean;
+  taskQuery?: string;
 };
 
 export type CompactionProjection = Projection & {
@@ -152,10 +154,8 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
     }
   }
 
-  return {
-    observations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-    reflections,
-  };
+  const active = applyMemoryPolicies(entries, observations, reflections, observationsBoundary);
+  return { observations: active.observations.filter(o => !droppedObservationIds.has(o.id)), reflections: active.reflections };
 }
 
 function projectionFromMemoryDetails(details: MemoryDetails): Projection {
@@ -253,6 +253,24 @@ export function buildCompactionProjection(
   const fullFold = observationTokens >= config.observationsPoolMaxTokens;
   let projection = fullFold ? fullProjection(entries, firstKeptEntryId) : normalProjection;
 
+  // A pin/correction is current control state, not raw history to summarize.
+  // Honor it even when its event was appended after the selected source cut.
+  if (entries.some(e => e.type === "custom" && e.customType === OM_MEMORY_POLICY)) {
+    const current = fullProjection(entries);
+    const obs = new Map(current.observations.map(o => [o.id, o]));
+    const refs = new Map(current.reflections.map(r => [r.id, r]));
+    projection = {
+      observations: [...new Map([
+        ...projection.observations.filter(o => obs.has(o.id)).map(o => [o.id, obs.get(o.id)!] as const),
+        ...current.observations.filter(o => o.pinned).map(o => [o.id, o] as const),
+      ]).values()],
+      reflections: [...new Map([
+        ...projection.reflections.filter(r => refs.has(r.id)).map(r => [r.id, refs.get(r.id)!] as const),
+        ...current.reflections.filter(r => r.pinned).map(r => [r.id, r] as const),
+      ]).values()],
+    };
+  }
+
   // Output limits are independent of stored-token full-fold maintenance.
   // Source records stay in the branch; raw/view callers can omit finite caps.
   if (config.observationsPoolMaxTokens > 0 && Number.isFinite(config.observationsPoolMaxTokens)) {
@@ -260,6 +278,7 @@ export function buildCompactionProjection(
       observations: selectPriorObservations(
         projection.observations,
         config.observationsPoolMaxTokens,
+        config.taskQuery,
       ),
       reflections: projection.reflections,
     };
@@ -272,7 +291,7 @@ export function buildCompactionProjection(
   ) {
     projection = {
       ...projection,
-      reflections: selectPriorReflections(projection.reflections, config.reflectionsPoolMaxTokens),
+      reflections: selectPriorReflections(projection.reflections, config.reflectionsPoolMaxTokens, config.taskQuery),
     };
   }
 

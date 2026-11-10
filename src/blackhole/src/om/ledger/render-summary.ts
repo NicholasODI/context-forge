@@ -19,7 +19,12 @@ export const OM_FOOTER_FULL = `----\n${OM_INSTRUCTIONS_FULL}\n----`;
 export const OM_FOOTER_BASIC = `----\n${OM_INSTRUCTIONS_BASIC}\n----`;
 
 export function observationToSummaryLine(observation: Observation): string {
-  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] ${observation.content}`;
+  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}]${observation.pinned ? " [pinned]" : ""} ${observation.content}`;
+}
+
+/** Same conservative rendered-cost basis for pressure, targets, and pruning. */
+export function observationRenderedTokens(observation: Observation): number {
+  return estimateStringTokens(observationToSummaryLine(observation)) + 1;
 }
 
 /** Score an observation for cap/trim selection.
@@ -27,14 +32,20 @@ export function observationToSummaryLine(observation: Observation): string {
  *  Recency is based on position in the flat-mapped array (0 = oldest, N-1 = newest),
  *  avoiding wall-clock dependency that punishes sessions spanning days or weeks. */
 export function scoreObservation(obs: Observation, index: number, total: number): number {
-  const base =
-    obs.relevance === "high" || obs.relevance === "critical"
-      ? 10
+  const base = obs.pinned ? 1000 : obs.relevance === "critical" ? 20 :
+    obs.relevance === "high" ? 10
       : obs.relevance === "medium"
         ? 5
         : 1;
   const recency = total > 1 ? index / (total - 1) : 1;
   return base + recency;
+}
+
+function queryBonus(content: string, query: string): number {
+  const stop = new Set(["the", "and", "for", "with", "this", "that", "from", "into"]);
+  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_./-]{3,}/gu) ?? [])].filter(t => !stop.has(t));
+  const lower = content.toLowerCase();
+  return Math.min(2, terms.filter(t => lower.includes(t)).length * 0.5);
 }
 
 /** Select observations up to a token budget, keeping high-relevance items
@@ -51,40 +62,55 @@ export function scoreObservation(obs: Observation, index: number, total: number)
 export function selectPriorObservations(
   observations: Observation[],
   maxTokens: number,
+  query = "",
 ): Observation[] {
   const ranked = observations.map((obs, index) => ({
     obs,
     index,
-    score: scoreObservation(obs, index, observations.length),
+    score: scoreObservation(obs, index, observations.length) + queryBonus(obs.content, query),
   }));
   ranked.sort((a, b) => b.score - a.score);
   const selected: typeof ranked = [];
-  let rendered = "";
+  let usedTokens = 0;
   for (const item of ranked) {
-    const next = rendered + (selected.length ? "\n" : "") + observationToSummaryLine(item.obs);
-    if (estimateStringTokens(next) > maxTokens) continue;
+    const cost = estimateStringTokens(observationToSummaryLine(item.obs)) + (selected.length ? 1 : 0);
+    if (usedTokens + cost > maxTokens) {
+      if (item.obs.pinned) throw new PinnedMemoryOverflowError();
+      continue;
+    }
     selected.push(item);
-    rendered = next;
+    usedTokens += cost;
   }
   return selected.sort((a, b) => a.index - b.index).map((item) => item.obs);
 }
 
 export function reflectionToSummaryLine(reflection: Reflection): string {
-  return `[${reflection.id}] ${reflection.content}`;
+  return `[${reflection.id}]${reflection.pinned ? " [pinned]" : ""} ${reflection.content}`;
+}
+
+export class PinnedMemoryOverflowError extends Error {
+  override readonly name = "PinnedMemoryOverflowError";
+  constructor() { super("Pinned memory exceeds the configured output budget. Inspect/unpin or supersede records before compacting; no pinned record was silently omitted."); }
 }
 
 /** Bound compaction output only; worker reflection prompts stay unchanged. */
-export function selectPriorReflections(reflections: Reflection[], maxTokens: number): Reflection[] {
+export function selectPriorReflections(reflections: Reflection[], maxTokens: number, query = ""): Reflection[] {
   const selected: Reflection[] = [];
-  let rendered = "";
-  for (let i = reflections.length - 1; i >= 0; i--) {
-    const reflection = reflections[i]!;
-    const next = rendered + (selected.length ? "\n" : "") + reflectionToSummaryLine(reflection);
-    if (estimateStringTokens(next) > maxTokens) continue;
+  let usedTokens = 0;
+  const rank = { low: 0, medium: 5, high: 10, critical: 20 };
+  const ranked = reflections.map((reflection, i) => ({ reflection, i, score: (reflection.pinned ? 1000 : rank[reflection.relevance ?? "medium"]) + queryBonus(reflection.content, query) + i / Math.max(1, reflections.length) }))
+    .sort((a, b) => b.score - a.score);
+  for (const { reflection } of ranked) {
+    const cost = estimateStringTokens(reflectionToSummaryLine(reflection)) + (selected.length ? 1 : 0);
+    if (usedTokens + cost > maxTokens) {
+      if (reflection.pinned) throw new PinnedMemoryOverflowError();
+      continue;
+    }
     selected.push(reflection);
-    rendered = next;
+    usedTokens += cost;
   }
-  return selected.reverse();
+  const ids = new Set(selected.map(r => r.id));
+  return reflections.filter(r => ids.has(r.id));
 }
 
 export function renderSummary(reflections: Reflection[], observations: Observation[]): string {

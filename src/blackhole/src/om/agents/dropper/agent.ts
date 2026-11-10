@@ -22,6 +22,8 @@ import {
   type ProviderFetchOption,
 } from "../../provider-stream.js";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
+import { observationRenderedTokens } from "../../ledger/render-summary.js";
+import { dropTargetTokens, attachDropEvidence, type DropEvidence, type DropSelection } from "./selection.js";
 import { debugLog } from "../../debug-log.js";
 import {
   isDeterministicError,
@@ -49,6 +51,7 @@ interface RunDropperArgs {
   /** Compact summary of existing active observations for context. */
   existingObservationsSummary?: string;
   budgetTokens: number;
+  targetTokens?: number;
   /** Minimum pool fullness (fraction of budget) before dropping is allowed.
    *  Defaults to DROP_SKIP_FULLNESS (0.1) when unset. */
   skipFullness?: number;
@@ -155,7 +158,7 @@ export function normalizeDropObservationIds(
   return result.length > 0 ? result : undefined;
 }
 
-export async function runDropper(args: RunDropperArgs): Promise<string[] | undefined> {
+export async function runDropper(args: RunDropperArgs): Promise<DropSelection | undefined> {
   const {
     model,
     apiKey,
@@ -168,6 +171,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
     signal,
   } = args;
   if (observations.length === 0) return undefined;
+  if (!observations.some(o => !o.pinned && o.relevance !== "critical" && reflections.some(r => r.supportingObservationIds.includes(o.id)))) return undefined;
 
   // Candidate-scoped, not the live pool as such: `observations` is exactly the
   // set the caller chose to evaluate — the post-last-drop delta for cadence
@@ -178,12 +182,12 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   // batch quotes the pool-wide pressure the whole-pool run would show.
   const observationTokens =
     args.pressure?.tokens ??
-    observations.reduce((sum, observation) => sum + observation.tokenCount, 0);
+    observations.reduce((sum, observation) => sum + observationRenderedTokens(observation), 0);
   const fullness = observationPoolFullness(observationTokens, budgetTokens);
   const urgency = dropUrgencyForFullness(fullness);
   const maxDropsAllowed =
     args.pressure?.maxDrops ??
-    maxDropCountForPool(observations, observationTokens, budgetTokens, skipFullness);
+    maxDropCountForPool(observations, observationTokens, budgetTokens, skipFullness, args.targetTokens);
   const coverageById = reflectionCoverageMap(observations, reflections);
   const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
   debugLog("dropper.agent_start", {
@@ -216,6 +220,7 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
   }
 
   const proposedDropIds: string[] = [];
+  const proofs: DropEvidence = {};
   const proposed = new Set<string>();
   const allowed = new Map(observations.map((observation) => [observation.id, observation]));
   let toolCallCount = 0;
@@ -248,6 +253,14 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
           requestMissingIds++;
           continue;
         }
+        const replacements = params.replacements?.[id];
+        if (observation.relevance === "critical") {
+          criticalCandidateIdsCount++;
+          requestCriticalCandidateIds++;
+        }
+        if (observation.pinned || observation.relevance === "critical" || typeof params.reason !== "string" || !params.reason.trim() ||
+            !Array.isArray(replacements) || replacements.length === 0 ||
+            !replacements.every(refId => reflections.some(r => r.id === refId && r.supportingObservationIds.includes(id)))) continue;
         if (seenInRequest.has(id)) {
           duplicateInRequestCount++;
           requestDuplicateIds++;
@@ -260,11 +273,8 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
           continue;
         }
         proposed.add(id);
+        proofs[id] = { reflectionIds: [...replacements], reason: params.reason };
         proposedDropIds.push(id);
-        if (observation.relevance === "critical") {
-          criticalCandidateIdsCount++;
-          requestCriticalCandidateIds++;
-        }
         added++;
       }
       debugLog("dropper.tool_call", {
@@ -444,7 +454,7 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
       ),
       maxDropsAllowed,
     });
-    return proposedDropIds;
+    return attachDropEvidence(proposedDropIds, proofs);
   }
 
   const droppedIds = selectDropCandidates(
@@ -452,6 +462,7 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
     observations,
     maxDropsAllowed,
     reflections,
+    Math.max(0, observationTokens - dropTargetTokens(budgetTokens, args.targetTokens)),
   );
   const reason =
     droppedIds.length > 0
@@ -483,5 +494,5 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
     ),
     maxDropsAllowed,
   });
-  return droppedIds.length > 0 ? droppedIds : undefined;
+  return droppedIds.length > 0 ? attachDropEvidence(droppedIds, proofs) : undefined;
 }

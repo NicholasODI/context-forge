@@ -16,11 +16,16 @@ interface CacheEntry {
   result: LoadedMessages;
   mtimeMs: number;
   timestamp: number;
+  sourceBytes: number;
 }
 
 const MAX_CACHE_SIZE = 3;
 const CACHE_TTL_MS = 2_000;
+export const MAX_CACHED_SESSION_BYTES = 64 * 1024 * 1024;
+export const MAX_TOTAL_CACHED_SOURCE_BYTES = 128 * 1024 * 1024;
 const cache = new Map<string, CacheEntry>();
+
+export function clearSessionCache(): void { cache.clear(); }
 
 function cacheKey(
   sessionFile: string,
@@ -52,8 +57,8 @@ function getCached(
 
   // Verify file mtime hasn't changed
   try {
-    const mtimeMs = statSync(sessionFile).mtimeMs;
-    if (mtimeMs !== entry.mtimeMs) {
+    const info = statSync(sessionFile);
+    if (info.mtimeMs !== entry.mtimeMs || info.size !== entry.sourceBytes) {
       cache.delete(key);
       return undefined;
     }
@@ -62,6 +67,8 @@ function getCached(
     return undefined;
   }
 
+  cache.delete(key);
+  cache.set(key, entry);
   return entry.result;
 }
 
@@ -71,16 +78,18 @@ function setCache(
   allowedEntryIds: Set<string> | undefined,
   result: LoadedMessages,
 ): void {
-  // Evict oldest if at capacity
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const oldest = cache.entries().next();
-    if (!oldest.done) cache.delete(oldest.value[0]);
-  }
-
   try {
-    const mtimeMs = statSync(sessionFile).mtimeMs;
+    const info = statSync(sessionFile);
     const key = cacheKey(sessionFile, full, allowedEntryIds);
-    cache.set(key, { result, mtimeMs, timestamp: Date.now() });
+    cache.delete(key);
+    if (info.size > MAX_CACHED_SESSION_BYTES) return;
+    const retained = () => [...cache.values()].reduce((sum, entry) => sum + entry.sourceBytes, 0);
+    while (cache.size >= MAX_CACHE_SIZE || retained() + info.size > MAX_TOTAL_CACHED_SOURCE_BYTES) {
+      const oldest = cache.keys().next();
+      if (oldest.done) break;
+      cache.delete(oldest.value);
+    }
+    cache.set(key, { result, mtimeMs: info.mtimeMs, sourceBytes: info.size, timestamp: Date.now() });
   } catch {
     // Can't stat the file — don't cache
   }

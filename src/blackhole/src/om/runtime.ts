@@ -77,6 +77,8 @@ export interface PipelineCursor {
    *  evaluated — dropper only, and only on `"empty"` cursors. It suppresses
    *  repeat pressure runs until the pool changes; see `consolidation.ts`. */
   activePoolSignature?: string;
+  /** Completed reflector input identity, including successful empty reviews. */
+  reviewSignature?: string;
 }
 
 export interface PipelineCursors {
@@ -1033,9 +1035,11 @@ export class Runtime {
     entryId: string,
     state: CursorState,
     activePoolSignature?: string,
+    reviewSignature?: string,
   ): void {
     const cursor: PipelineCursor = { entryId, state };
     if (activePoolSignature) cursor.activePoolSignature = activePoolSignature;
+    if (reviewSignature) cursor.reviewSignature = reviewSignature;
     this.cursors[stage] = cursor;
   }
 
@@ -1054,6 +1058,7 @@ export class Runtime {
         this.cursors.reflector = {
           entryId: stored.reflector.entryId,
           state: stored.reflector.state as CursorState,
+          ...(typeof stored.reflector.reviewSignature === "string" && /^[a-f0-9]{64}$/.test(stored.reflector.reviewSignature) ? { reviewSignature: stored.reflector.reviewSignature } : {}),
         };
       }
       if (stored.dropper?.entryId && stored.dropper?.state) {
