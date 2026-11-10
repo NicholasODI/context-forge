@@ -37,7 +37,13 @@ export function createContextForgeExtension(
 		// waiting for session_start, so commands work after omp restart.
 		const omRuntime = new Runtime();
 		registerBlackholeCommands(pi, omRuntime);
-		registerForgeSettings(pi);
+		registerForgeSettings(pi, async ctx => {
+			const { openBlackholeSettings, config, GLOBAL_CONFIG_DIR } =
+				await import("./blackhole/src/pi-base/blackhole-settings.ts");
+			await openBlackholeSettings(ctx);
+			omRuntime.config = config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config;
+			omRuntime.configLoaded = true;
+		});
 		const projectMemory = registerProjectMemory(pi, ctx => loadConfig(ctx).projectMemory);
 
 		pi.on("session_start", async (_event, ctx) => {

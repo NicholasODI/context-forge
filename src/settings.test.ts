@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG, loadContextForgeConfig } from "./config.ts";
-import { openForgeSettings, saveSettings } from "./settings.ts";
+import { openForgeSettings, registerForgeSettings, saveSettings } from "./settings.ts";
 
 function ui(choices: (number | undefined)[], inputs: (string | undefined)[] = []) {
  return {
@@ -43,4 +43,46 @@ it("writes reloadable settings and preserves external changes", () => {
   expect(() => saveSettings(path, DEFAULT_CONFIG, original)).toThrow("changed");
   expect(readFileSync(path, "utf8")).toBe("external edit");
  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+it("routes advanced settings through the shared runtime callback", async () => {
+ let handler: (args: string, ctx: any) => Promise<void> = async () => {};
+ const api = { registerCommand: (_name: string, command: any) => { handler = command.handler; } };
+ const advanced = vi.fn(async () => {});
+ registerForgeSettings(api as any, advanced);
+ const menu = ui([1]);
+ const ctx = { hasUI: true, ui: menu };
+ await handler("", ctx);
+ expect(advanced).toHaveBeenCalledExactlyOnceWith(ctx);
+ expect(menu.select).toHaveBeenCalledTimes(1);
+});
+it("shows continuation information without opening advanced settings or writing files", async () => {
+ let handler: (args: string, ctx: any) => Promise<void> = async () => {};
+ const advanced = vi.fn(async () => {});
+ registerForgeSettings({ registerCommand: (_name: string, command: any) => { handler = command.handler; } } as any, advanced);
+ const menu = ui([2]);
+ await handler("", { hasUI: true, ui: menu });
+ expect(advanced).not.toHaveBeenCalled();
+ expect(menu.notify.mock.calls[0][0]).toContain("3,000");
+ expect(menu.notify.mock.calls[0][0]).toContain("/forge-memory diagnostics");
+});
+
+it("advanced recall and retained-output controls accept opt-out zero and reject invalid budgets", async () => {
+ const { config } = await import("./blackhole/src/pi-base/blackhole-settings.ts");
+ const { DEFAULTS } = await import("./blackhole/src/core/unified-config.ts");
+ // Inspect the schema consumed by the existing ConfigManager modal and validator.
+ const { opts } = config as unknown as { opts: {
+  fields: (value: typeof DEFAULTS) => Array<{ key: string; min?: number }>;
+  validate: (raw: Record<string, unknown>) => typeof DEFAULTS;
+ } };
+ const fields = opts.fields(DEFAULTS);
+ for (const key of ["recallResponseMaxChars", "retainedToolOutputMaxTokens"] as const) {
+  expect(fields.find(field => field.key === key)?.min).toBe(0);
+  expect(opts.validate({ [key]: 0 })[key]).toBe(0);
+  expect(opts.validate({ [key]: 12000 })[key]).toBe(12000);
+  for (const invalid of [-1, 1.5, Infinity, "12000"]) {
+   expect(opts.validate({ [key]: invalid })[key]).toBe(DEFAULTS[key]);
+  }
+ }
 });

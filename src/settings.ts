@@ -77,11 +77,27 @@ export async function openForgeSettings(ui: SettingsUI, initial: ContextForgeCon
 	}
 }
 
-export function registerForgeSettings(pi: ExtensionAPI): void {
+export function registerForgeSettings(pi: ExtensionAPI, openAdvanced: (ctx: import("@earendil-works/pi-coding-agent").ExtensionContext) => Promise<void>): void {
 	pi.registerCommand("context-forge", {
-		description: "Configure Context Forge features interactively (restart required)",
+		description: "Configure features, compaction, memory workers, retention and recall",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
+			const section = await ctx.ui.select("Context Forge settings", [
+				"Features and reducer (restart required)",
+				"Compaction, memory workers, retention and recall",
+				"Continuation state and evidence — information",
+				"Close",
+			]);
+			if (!section || section === "Close") return;
+			if (section === "Compaction, memory workers, retention and recall") {
+				try { await openAdvanced(ctx); }
+				catch (error) { ctx.ui.notify(`Unable to open advanced settings: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+				return;
+			}
+			if (section === "Continuation state and evidence — information") {
+				ctx.ui.notify("Project memory is controlled by the Project memory feature toggle. Focused continuation, goal supersession and check receipts follow the saved task state, not separate feature switches. Fixed safety budgets: Resume Context body 3,000 characters (3,200 with markers), live reminder 8,000, tool previews 16,000. Use /forge-memory to inspect state and /forge-memory diagnostics for omissions, freshness and attribution. Manage task records through project_memory. These records do not authorize work; check receipts do not prove expected tests ran.", "info");
+				return;
+			}
 			const global = "Global defaults";
 			const project = "Project settings (override global defaults)";
 			const scope = await ctx.ui.select("Context Forge — choose save scope; advanced tuning: /blackhole settings", ctx.isProjectTrusted() ? [global, project] : [global]);
