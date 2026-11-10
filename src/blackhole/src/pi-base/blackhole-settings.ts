@@ -141,8 +141,18 @@ export const config = new ConfigManager<UnifiedConfig>({
       description:
         "Token budget for historical tool-output text; newest is retained first and older text remains available via recall",
       value: cfg.retainedToolOutputMaxTokens,
-      min: 1_000,
+      min: 0,
       max: 200_000,
+      step: 1_000,
+    },
+    {
+      key: "recallResponseMaxChars",
+      type: "number",
+      label: "Recall response max characters",
+      description: "Bounds recall search/expansion responses; 0 disables the bound",
+      value: cfg.recallResponseMaxChars,
+      min: 0,
+      max: 2_000_000,
       step: 1_000,
     },
     // Context-window-derived knobs (issue #60) + preset curve (spec §4). Always
@@ -540,6 +550,7 @@ export const config = new ConfigManager<UnifiedConfig>({
       "observeAfterTokens",
       "reflectAfterTokens",
       "retainedToolOutputMaxTokens",
+      "recallResponseMaxChars",
       "observationsPoolMaxTokens",
       "reflectionsPoolMaxTokens",
       "observationsPoolTargetTokens",
@@ -553,11 +564,11 @@ export const config = new ConfigManager<UnifiedConfig>({
       // SAFETY: merged is a plain config object; indexing by dynamic key needs
       // the Record view to read/write numeric fields uniformly.
       const v = (merged as unknown as Record<string, unknown>)[k];
-      const minVal = k === "observerPreambleMaxTokens" || k === "reflectionsPoolMaxTokens" ? 0 : 1;
+      const minVal = k === "observerPreambleMaxTokens" || k === "reflectionsPoolMaxTokens" || k === "recallResponseMaxChars" || k === "retainedToolOutputMaxTokens" ? 0 : 1;
       if (
         typeof v !== "number" ||
         !Number.isFinite(v) ||
-        ((k === "retainedToolOutputMaxTokens" || k === "reflectionsPoolMaxTokens") &&
+        ((k === "retainedToolOutputMaxTokens" || k === "recallResponseMaxChars" || k === "reflectionsPoolMaxTokens") &&
           !Number.isInteger(v)) ||
         v < minVal
       ) {

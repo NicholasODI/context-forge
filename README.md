@@ -54,6 +54,36 @@ Resolution order (later wins):
 2. Global: `~/.omp/agent/context-forge.json`
 3. Project: `<cwd>/.omp/context-forge.json` (only when the project is trusted)
 
+### Interactive settings
+
+Run `/context-forge` for a terminal settings menu using arrows and Enter.
+The entry menu offers:
+
+- **Features and reducer**: global or trusted-project feature toggles, reducer
+  model/provider, and cache write/read ratio.
+- **Compaction, memory workers, retention and recall**: the existing advanced
+  modal, including summary/tail modes, thresholds, worker models and budgets,
+  dropper controls, retained tool-output tokens, and recall-response characters.
+  It uses the same configuration and runtime refresh as `/blackhole settings`.
+- **Continuation state and evidence**: an explanation of focused handoffs,
+  fixed safety budgets, and the commands for inspecting state and diagnostics.
+
+In the features menu, changes are staged until **Save and close**. Escape or Cancel discards them;
+Reset changes only the draft until saved.
+
+**Restart OMP after saving feature settings** to apply all changes. That menu
+edits saved settings, not currently registered mechanisms. The advanced modal
+uses its existing global/project/session scopes and environment precedence;
+closing it refreshes the memory runtime configuration. Its settings cannot
+activate a mechanism disabled in the feature configuration until restart.
+Zero retained tool-output tokens disables retention limiting; zero recall-response
+characters disables response bounding. Continuation budgets are fixed safeguards,
+not editable options. Project files take precedence over global
+files; omitted fields use built-in defaults, matching the existing loader.
+Saving writes a complete configuration, so project settings can mask later
+global changes. Invalid files and files changed while the menu is open are not
+overwritten. Advanced tuning remains under `/blackhole settings`.
+
 Example:
 
 ```json
@@ -79,6 +109,7 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 
 | Command | Description |
 |---|---|
+| `/context-forge` | Interactive feature settings, advanced memory/compaction settings, and continuation information. |
 | `/blackhole` | Manual compact with structural summary. Subcommands: `[settings]` config overlay, `[changelog]`, `[cleanup]`, `[om-off]`/`[om-on]`. |
 | `/blackhole-memory` | Memory pipeline status & token counters. `[view]` visible observations/reflections, `[full]` complete recorded memory (copies to clipboard). |
 | `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Filter with `id:MEMORY_ID`; page with `offset:N limit:1–25`. Includes drop-marker provenance. |
