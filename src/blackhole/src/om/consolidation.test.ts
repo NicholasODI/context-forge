@@ -131,6 +131,7 @@ describe("observer completion and bounded retries", () => {
 
 it("persists validated replacement evidence when the dropper deactivates an observation", async () => {
   const s = stage(true);
+  s.runtime.lastDropperError = "An older incomplete attempt";
   s.runtime.config.observationsPoolMaxTokens = 50;
   s.runtime.config.observationsPoolTargetTokens = 25;
   const item = s.entries[1].data.observations[0];
@@ -140,13 +141,15 @@ it("persists validated replacement evidence when the dropper deactivates an obse
   ] } });
   let calls = 0;
   s.ctx.modelRegistry.streamSimple = () => response(calls++ === 0 ? {
-    ids: [item.id], reason: "The provided reflection preserves the complete fact", replacements: { [item.id]: ["000000000002"] },
+    complete: true, ids: [item.id], reason: "The provided reflection preserves the complete fact", replacements: { [item.id]: ["000000000002"] },
   } : undefined, undefined, "drop_observations");
   expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
   const [type, data] = s.pi.appendEntry.mock.calls[0];
   expect(type).toBe("om.observations.dropped");
   expect(data.proofs[item.id].reflectionIds).toEqual(["000000000002"]);
   expect(data.proofs[item.id].reason).toContain("preserves");
+  expect(calls).toBe(1);
+  expect(s.runtime.lastDropperError).toBeUndefined();
 });
 
 it("vetoes a drop whose claimed replacement does not cite the observation", async () => {

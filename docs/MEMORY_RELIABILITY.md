@@ -25,8 +25,15 @@ by the main agent; their filesystem/ledger operations make no provider calls.
   checks do not claim reviewed coverage.
 
 Observer inputs omit assistant thinking to reduce repeated worker input. Raw
-session evidence remains available through recall. The reflector and dropper
-keep their existing normal-stop completion protocol.
+session evidence remains available through recall. The reflector keeps its existing completion behavior. The dropper supports
+`complete: true` on a validated final `drop_observations` call, terminating
+immediately without another provider confirmation turn. A final empty batch
+(`ids: []`, `replacements: {}`, a reason, and `complete: true`) means keep all
+candidates. Invalid IDs, missing replacement coverage, pinned/critical proposals,
+or a provider error/output cut cannot authorize that close. Legacy normal text
+stops remain supported; a bare terminal `toolUse` without a validated close is
+still incomplete. Successful dropper stage completion clears its previous error
+from status.
 
 ## Protect or correct session memory
 

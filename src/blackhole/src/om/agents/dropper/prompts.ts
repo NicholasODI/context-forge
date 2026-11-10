@@ -48,4 +48,6 @@ What you cannot do:
 - You cannot add new observations or reflections.
 - You can only call drop_observations with ids from the current observations list.
 
-Do not force drops you do not believe in. If no observations are safe to drop, do not call the tool and reply briefly. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
+Completion protocol: evaluate the entire provided candidate list, then call drop_observations with complete=true. Submit the final safe ids, replacements, and reason in that call; it ends the evaluation immediately, so no follow-up prose is needed. If none are safe, call it with ids=[], replacements={}, a reason, and complete=true. Use complete=false only for intermediate proposals. Do not repeat already queued ids.
+
+Do not force drops you do not believe in. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
