@@ -150,8 +150,22 @@ const BASH_CAP = 120;
 // awk/python3/node/bun are data-processing commands — their output carries semantic meaning.
 const PIPE_TAIL_RE = /\s*\|\s*(?:head|tail|sort|wc|column|tr|cut|uniq)(?:\s[^|]*)?$/;
 
-/** Semantic compression: strip cd prefix, pipe tail formatting, cap length */
-const compressBash = (raw: string): string => {
+/** Semantic compression of text commands; preserve other history shapes as data. */
+const compressBash = (raw: unknown): string => {
+  // Tool arguments and persisted bashExecution messages are external input.
+  // A TS cast cannot turn an argv array/object into newline-separated shell
+  // text. Keep a bounded, explicit data preview rather than crashing the
+  // entire summary or inventing command syntax with String(raw)/array.join().
+  if (typeof raw !== "string") {
+    let preview: string;
+    try {
+      preview = JSON.stringify(raw) ?? typeof raw;
+    } catch {
+      preview = `${typeof raw} (not JSON-serializable)`;
+    }
+    const prefix = "[non-text command: ";
+    return `${prefix}${clip(preview, BASH_CAP - prefix.length - 1)}]`;
+  }
   // Flatten multi-line: join lines with semicolons
   let cmd = raw
     .split("\n")
@@ -196,7 +210,7 @@ const toolOneLiner = (name: string, args: Record<string, unknown>): string => {
   const path = extractPath(args);
   if (path) return `* ${name} "${path}"`;
   if (name === "bash" || name === "Bash") {
-    const raw = (args.command ?? args.description ?? "") as string;
+    const raw = args.command ?? args.description ?? "";
     const cmd = compressBash(raw);
     return `* ${name} "${cmd}"`;
   }
