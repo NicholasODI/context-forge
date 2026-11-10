@@ -93,11 +93,14 @@ reminder before and after compaction and are shared by sessions in that project.
 
 When project memory is enabled and trusted, each Blackhole compaction prepends
 one bounded Resume Context block from the current saved task. It includes task
-status, evidence freshness, goal, up to two blockers, the next two actions, and
+status, evidence freshness, goal, up to two blockers, one next action, and
 recent progress. It makes no model call, does not infer a task from missing data,
 and creates no project files. `project_memory set_task` accepts a `blockers` list;
 older notes without that field remain readable. Supply the complete lists when
 replacing the task.
+
+The focused continuation lifecycle, attribution, scoped evidence and bounded
+handoff diagnostics are documented in [CONTINUATION_STATE.md](CONTINUATION_STATE.md).
 
 The prefix is kept below 3,200 characters by clipping individual fields; complete
 notes remain accessible through `project_memory`. Previous prefixes are stripped

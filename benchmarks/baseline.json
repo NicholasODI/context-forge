@@ -6,7 +6,7 @@
   "profiles": [
     {
       "profile": "tight-8k",
-      "fixtureVersion": 2,
+      "fixtureVersion": 3,
       "cycles": 300,
       "declaredWindow": 8192,
       "metrics": {
@@ -23,7 +23,7 @@
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 871,
-        "maxSummaryTokens": 1348,
+        "maxSummaryTokens": 1456,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 22,
         "hostCompactionMessages": 1,
@@ -75,7 +75,7 @@
     },
     {
       "profile": "local-32k",
-      "fixtureVersion": 2,
+      "fixtureVersion": 3,
       "cycles": 300,
       "declaredWindow": 32768,
       "metrics": {
@@ -92,7 +92,7 @@
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 871,
-        "maxSummaryTokens": 2140,
+        "maxSummaryTokens": 2248,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 50,
         "hostCompactionMessages": 1,
@@ -144,7 +144,7 @@
     },
     {
       "profile": "local-131k",
-      "fixtureVersion": 2,
+      "fixtureVersion": 3,
       "cycles": 300,
       "declaredWindow": 131072,
       "metrics": {
@@ -161,7 +161,7 @@
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 870,
-        "maxSummaryTokens": 3442,
+        "maxSummaryTokens": 3550,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 72,
         "hostCompactionMessages": 1,

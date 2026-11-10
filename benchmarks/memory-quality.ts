@@ -1,7 +1,7 @@
 /** Offline synthetic fixture: no workers, provider calls, or user-state access. */
 import { buildSessionContext, convertToLlm } from "@earendil-works/pi-coding-agent";
 import { compile } from "../src/blackhole/src/core/summarize.js";
-import { CONTINUITY_START, withContinuity } from "../src/blackhole/src/core/continuity.js";
+import { CONTINUITY_START, withContinuity, stripContinuity } from "../src/blackhole/src/core/continuity.js";
 import { buildCompactionProjection } from "../src/blackhole/src/om/ledger/projection.js";
 import { foldLedger } from "../src/blackhole/src/om/ledger/fold.js";
 import { recallMemorySources } from "../src/blackhole/src/om/ledger/recall.js";
@@ -110,7 +110,9 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   }
   const archive = [1, 2, 3, 4, 5].filter(n => n !== 4 || cycles >= 75).map(n => recallMemorySources(entries, memoryId(n)));
   const context = buildSessionContext(entries as any);
-  const wire = convertToLlm(context.messages);
+  // Mirror the live hook: its one fresh handoff replaces the persisted copy.
+  const wire = convertToLlm(context.messages.map(m => (m as any).role === "compactionSummary"
+    ? { ...m, summary: stripContinuity((m as any).summary) } : m));
   const reminder = renderReminder(state, freshness);
   const visible = JSON.stringify(wire) + reminder;
   const questions: Omit<Probe, "exposed">[] = [
@@ -123,7 +125,7 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   ];
   const probes: Probe[] = questions.map(q => ({ ...q, exposed: q.id === "retry" ? finalSelected.includes(memoryId(5)) : visible.includes(q.expected) }));
   return {
-    profile: profile.name, fixtureVersion: 2, cycles, declaredWindow: profile.window,
+    profile: profile.name, fixtureVersion: 3, cycles, declaredWindow: profile.window,
     metrics: { pinnedHits, pinnedChecks, correctedHits, correctedChecks, staleLeaks, budgetViolations, prefixViolations, staleActionLeaks, recordShapeViolations, criticalTagViolations,
       archiveRecovered: archive.filter(r => r.status === "found" && !r.partial && r.sourceEntries.length).length, archiveChecks: archive.length,
       pruned, maxSummaryTokens, estimatedSummaryFitsWindow: maxSummaryTokens < profile.window,

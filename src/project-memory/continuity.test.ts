@@ -8,6 +8,7 @@ import { renderContinuity } from "./continuity";
 import { emptyMemory, renderReminder, type ProjectMemory } from "./store";
 import { CONTINUITY_START, CONTINUITY_END, stripContinuity, withContinuity } from "../blackhole/src/core/continuity";
 import { compile } from "../blackhole/src/core/summarize";
+import * as summarize from "../blackhole/src/core/summarize";
 import { registerBeforeCompactHook } from "../blackhole/src/hooks/before-compact";
 import { projectAppendOnlyContext } from "../blackhole/src/core/compaction-chain";
 import { Runtime } from "../blackhole/src/om/runtime";
@@ -39,10 +40,11 @@ describe("deterministic continuity", () => {
     let summary = "[Session Goal]\nRepair the observer";
     for (let n = 0; n < 300; n++) summary = withContinuity(summary, block);
     expect(summary.split(CONTINUITY_START)).toHaveLength(2);
-    expect(stripContinuity(summary)).toBe("[Session Goal]\nRepair the observer");
+    expect(stripContinuity(summary)).toContain("Saved working objective");
+    expect(stripContinuity(summary)).not.toContain("Repair the observer");
     const compiled = compile({ messages: [{ role: "user", content: "Continue checking", timestamp: 1 }], previousSummary: summary });
     expect(compiled).not.toContain(CONTINUITY_START);
-    expect(compiled).not.toContain("xxxxxx");
+    expect(compiled).toContain("Saved working objective");
     const quoted = `const start = "${CONTINUITY_START}"; const end = "${CONTINUITY_END}";`;
     expect(stripContinuity(quoted)).toBe(quoted);
   });
@@ -129,5 +131,20 @@ describe("deterministic continuity", () => {
     }, { cwd: root, ui: { notify: vi.fn() }, sessionManager: { getEntries: () => entries } });
     expect(result).toEqual({ cancel: true });
     expect(runtime.lastCompactCancelled).toBe(true);
+  });
+  it("does not replace an empty structural summary with only a saved goal", async () => {
+    const runtime = new Runtime(); runtime.config.memory = false;
+    vi.spyOn(runtime, "ensureConfig").mockImplementation(() => {});
+    const compiler = vi.spyOn(summarize, "compile").mockReturnValue("");
+    try {
+      const handlers = new Map<string, Function>();
+      const entries = Array.from({ length: 3 }, (_, n) => ({ type: "message", id: `entry-${n}`, message: {
+        role: n ? "assistant" : "user", content: n ? [{ type: "text", text: "Old details" }] : "Current request", timestamp: n,
+      } }));
+      registerBeforeCompactHook({ on: (name: string, handler: Function) => handlers.set(name, handler) } as any, runtime, async () => renderContinuity(state(), new Map()));
+      expect(await handlers.get("session_before_compact")!({ branchEntries: entries,
+        preparation: { firstKeptEntryId: "", tokensBefore: 50000, fileOps: { read: new Set(), written: new Set(), edited: new Set() } },
+      }, { cwd: root, ui: { notify: vi.fn() }, sessionManager: { getEntries: () => entries } })).toBeUndefined();
+    } finally { compiler.mockRestore(); }
   });
 });
