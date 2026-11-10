@@ -5,7 +5,7 @@ import { recallMemorySources } from "./recall";
 import { livePoolObservations, livePoolReflections } from "./progress";
 import { PinnedMemoryOverflowError, selectPriorObservations, selectPriorReflections, observationRenderedTokens } from "./render-summary";
 import { selectDropCandidates, maxDropCountForPool } from "../agents/dropper/selection";
-import type { Entry, Observation } from "./types";
+import { isObservation, isReflection, type Entry, type Observation } from "./types";
 
 const obs = (n: number, relevance: Observation["relevance"] = "high"): Observation => ({
   id: n.toString(16).padStart(12, "0"), content: `Important constraint ${n}: preserve evidence.`, relevance,
@@ -18,6 +18,28 @@ function record(n: number, relevance: Observation["relevance"] = "high"): Entry[
 const policy = (action: string, id: string, replacementId?: string): Entry => ({ type: "custom", id: `policy-${action}-${id}`, customType: "om.memory.policy", data: { action, id, replacementId, reason: "Explicit project decision" } });
 
 describe("retention and provenance", () => {
+  it("preserves observation/reflection shapes and critical importance when their IDs overlap", () => {
+    const observation = obs(1, "critical");
+    const entries = [...record(1, "critical"), { type: "custom", id: "reflection", customType: "om.reflections.recorded", data: {
+      coversUpToId: "source-1", reflections: [{ id: observation.id, content: observation.content, supportingObservationIds: [observation.id], tokenCount: 10 }],
+    } }];
+    const folded = foldLedger(entries);
+    expect(isObservation(folded.activeObservations[0])).toBe(true);
+    expect(isReflection(folded.activeReflections[0])).toBe(true);
+    expect(folded.activeObservations[0].relevance).toBe("critical");
+    expect(folded.activeReflections[0].relevance).toBe("critical");
+    expect(selectDropCandidates([observation.id], folded.activeObservations, 1, folded.activeReflections)).toEqual([]);
+    entries.push(policy("pin", observation.id));
+    expect(foldLedger(entries).activeObservations[0]).toMatchObject({ pinned: true, sourceEntryIds: ["source-1"] });
+    expect(foldLedger(entries).activeReflections[0]).toMatchObject({ pinned: true, supportingObservationIds: [observation.id] });
+  });
+  it("does not let derived reflection invalidation remove an independent observation with the same ID", () => {
+    const entries = [...record(1), ...record(2), { type: "custom", id: "reflection", customType: "om.reflections.recorded", data: {
+      coversUpToId: "source-2", reflections: [{ id: obs(2).id, content: obs(2).content, supportingObservationIds: [obs(1).id], tokenCount: 10 }],
+    } }, policy("invalidate", obs(1).id)];
+    expect(foldLedger(entries).activeReflections).toHaveLength(0);
+    expect(foldLedger(entries).activeObservations.map(o => o.id)).toEqual([obs(2).id]);
+  });
   it("ranks critical above newer high records", () => {
     expect(selectPriorObservations([obs(1, "critical"), obs(2)], 35).map(o => o.id)).toEqual([obs(1).id]);
   });

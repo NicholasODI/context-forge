@@ -19,7 +19,10 @@ extension registration, or user session/config/memory file is accessed.
 
 The corpus plants pinned constraints, an obsolete value followed by an explicit
 correction, a historical unpinned fact, a pinned decision, and changed task steps
-and blockers. Each profile adds 900 observations and 300 reflections, with
+and blockers. Fixture version 2 also plants an identical-content observation and
+reflection sharing a hash, and checks their shapes and critical tag through every
+compaction. Each profile adds 900 observations and 300 reflections, plus that
+shared-hash seed reflection, with
 periodic synthetic pruning proposals. All original source records stay in the
 branch as in the extension's append-only ledger.
 

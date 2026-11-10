@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { runDropper } from "./agent";
+import { foldLedger } from "../../ledger/fold";
 
 const model: any = { provider: "mock", id: "local", api: "openai-completions", contextWindow: 131072, maxTokens: 8192, reasoning: false };
 const observation: any = { id: "000000000001", content: "Preserve source evidence. ".repeat(20), relevance: "high", timestamp: "2026-11-10 00:00", sourceEntryIds: ["source"], tokenCount: 100 };
@@ -20,6 +21,15 @@ function response(batch?: unknown) {
 const args = (streamFn: any) => ({ model, apiKey: "", observations: [observation], reflections: [reflection], budgetTokens: 50, targetTokens: 25, maxTurns: 4, streamFn });
 
 describe("dropper explicit completion", () => {
+  it.each([undefined, "low"] as const)("keeps a critical observation protected when its reflection has the same content hash (reflection relevance %s)", async relevance => {
+    const critical = { ...observation, relevance: "critical" };
+    const sameIdReflection = { ...reflection, id: critical.id, ...(relevance ? { relevance } : {}) };
+    const folded = foldLedger([{ type: "custom", id: "observations", customType: "om.observations.recorded", data: { coversUpToId: "source", observations: [critical] } },
+      { type: "custom", id: "reflections", customType: "om.reflections.recorded", data: { coversUpToId: "source", reflections: [sameIdReflection] } }]);
+    const stream = vi.fn(() => response({ ids: [critical.id], replacements: { [critical.id]: [critical.id] }, reason: "Identical reflection", complete: true }));
+    expect(await runDropper({ ...args(stream), observations: folded.activeObservations, reflections: folded.activeReflections })).toBeUndefined();
+    expect(stream).not.toHaveBeenCalled();
+  });
   it.each(["True", "true"])("accepts the observed local-model completion spelling %s in one request", async complete => {
     const stream = vi.fn(() => response({ ids: [], replacements: {}, reason: "Keep all candidates", complete }));
     expect(await runDropper(args(stream))).toBeUndefined();

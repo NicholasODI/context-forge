@@ -6,6 +6,7 @@
   "profiles": [
     {
       "profile": "tight-8k",
+      "fixtureVersion": 2,
       "cycles": 300,
       "declaredWindow": 8192,
       "metrics": {
@@ -17,10 +18,12 @@
         "budgetViolations": 0,
         "prefixViolations": 0,
         "staleActionLeaks": 0,
+        "recordShapeViolations": 0,
+        "criticalTagViolations": 0,
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 871,
-        "maxSummaryTokens": 1355,
+        "maxSummaryTokens": 1348,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 22,
         "hostCompactionMessages": 1,
@@ -72,6 +75,7 @@
     },
     {
       "profile": "local-32k",
+      "fixtureVersion": 2,
       "cycles": 300,
       "declaredWindow": 32768,
       "metrics": {
@@ -83,10 +87,12 @@
         "budgetViolations": 0,
         "prefixViolations": 0,
         "staleActionLeaks": 0,
+        "recordShapeViolations": 0,
+        "criticalTagViolations": 0,
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 871,
-        "maxSummaryTokens": 2146,
+        "maxSummaryTokens": 2140,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 50,
         "hostCompactionMessages": 1,
@@ -138,6 +144,7 @@
     },
     {
       "profile": "local-131k",
+      "fixtureVersion": 2,
       "cycles": 300,
       "declaredWindow": 131072,
       "metrics": {
@@ -149,10 +156,12 @@
         "budgetViolations": 0,
         "prefixViolations": 0,
         "staleActionLeaks": 0,
+        "recordShapeViolations": 0,
+        "criticalTagViolations": 0,
         "archiveRecovered": 5,
         "archiveChecks": 5,
         "pruned": 870,
-        "maxSummaryTokens": 3449,
+        "maxSummaryTokens": 3442,
         "estimatedSummaryFitsWindow": true,
         "finalSelectedRecords": 72,
         "hostCompactionMessages": 1,

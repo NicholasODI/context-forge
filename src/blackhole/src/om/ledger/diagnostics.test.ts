@@ -23,6 +23,50 @@ function fixture() {
   return { entries, summary, projection };
 }
 describe("memory use diagnostics", () => {
+  it("separates a dropped observation from an included active reflection with the same hash", () => {
+    const observation = { ...o(1), relevance: "critical" as const };
+    const reflection = { id: observation.id, content: observation.content, supportingObservationIds: [observation.id], tokenCount: 10 };
+    const entries: Entry[] = [{ type: "message", id: "source", message: { role: "user", content: observation.content } },
+      { type: "custom", id: "obs", customType: "om.observations.recorded", data: { coversUpToId: "source", observations: [observation] } },
+      { type: "custom", id: "ref", customType: "om.reflections.recorded", data: { coversUpToId: "source", reflections: [reflection] } },
+      { type: "custom", id: "historical-drop", timestamp: "2026-11-01T00:00:00Z", customType: "om.observations.dropped", data: {
+        coversUpToId: "source", observationIds: [observation.id], proofs: { [observation.id]: { reflectionIds: [reflection.id], reason: "Historical marker, inspect source" } },
+      } }];
+    const config = { observationsPoolMaxTokens: 200, reflectionsPoolMaxTokens: 200, fullFoldAlways: true };
+    const projection = buildCompactionProjection(entries, "", config);
+    const summary = renderSummary(projection.reflections, projection.observations);
+    entries.push({ type: "compaction", id: "c1", firstKeptEntryId: "", summary, details: {
+      "om.folded": projection.details, [OM_SELECTION]: { version: 1, config, reviewedThrough: {} },
+    } });
+    const observed = observeMemoryContext([{ role: "compactionSummary", summary }], entries, "A");
+    const report = memoryDiagnostics(entries, observed, "A");
+    expect(report.reconstruction).toBe("available");
+    expect(report.rows.find(r => r.kind === "observation")).toMatchObject({ reason: "dropped", importance: "critical", currentActive: false, contextObserved: false,
+      dropEntry: { id: "historical-drop", timestamp: "2026-11-01T00:00:00Z" } });
+    expect(report.rows.find(r => r.kind === "reflection")).toMatchObject({ reason: "included", importance: "critical", currentActive: true, contextObserved: true });
+    expect(report.counts).toMatchObject({ dropped: 1, included: 1 });
+    expect(report.criticalDropMarkers).toBe(1);
+    expect(renderMemoryDiagnostics(report, 0, 10, observation.id)).toContain("written 2026-11-01T00:00:00Z");
+    expect(renderMemoryDiagnostics(report, 0, 10, observation.id)).toContain("replacement refs=");
+  });
+  it("counts and observes two selected record kinds independently even when their hashes match", () => {
+    const observation = o(1);
+    const reflection = { id: observation.id, content: observation.content, supportingObservationIds: [observation.id], tokenCount: 10 };
+    const entries: Entry[] = [{ type: "message", id: "source", message: { role: "user", content: observation.content } },
+      { type: "custom", id: "obs", customType: "om.observations.recorded", data: { coversUpToId: "source", observations: [observation] } },
+      { type: "custom", id: "ref", customType: "om.reflections.recorded", data: { coversUpToId: "source", reflections: [reflection] } }];
+    const config = { observationsPoolMaxTokens: 200, reflectionsPoolMaxTokens: 200, fullFoldAlways: true };
+    const projection = buildCompactionProjection(entries, "", config);
+    entries.push({ type: "compaction", id: "c1", firstKeptEntryId: "", details: {
+      "om.folded": projection.details, [OM_SELECTION]: { version: 1, config, reviewedThrough: {} },
+    } });
+    const observed = observeMemoryContext([{ role: "compactionSummary", summary: renderSummary(projection.reflections, []) }], entries, "A");
+    const report = memoryDiagnostics(entries, observed, "A");
+    expect(report.reconstruction).toBe("available");
+    expect(report.counts.included).toBe(2);
+    expect(report.rows.find(r => r.kind === "observation")?.contextObserved).toBe(false);
+    expect(report.rows.find(r => r.kind === "reflection")?.contextObserved).toBe(true);
+  });
   it("explains included, budget, dropped, corrected and post-snapshot records", () => {
     const { entries } = fixture();
     entries.push({ type: "custom", id: "later", customType: "om.observations.recorded", data: { coversUpToId: "u5", observations: [o(6)] } });
@@ -93,6 +137,9 @@ describe("memory use diagnostics", () => {
     await command.handler("diagnostics offset:1 limit:2", ctx);
     expect(ctx.ui.notify.mock.calls.at(-1)[0]).toContain("Records 2–3 of 5");
     expect(ctx.ui.notify.mock.calls.at(-1)[0]).toContain("not a provider-wire receipt");
+    await command.handler(`diagnostics id:${o(1).id} limit:2`, ctx);
+    expect(ctx.ui.notify.mock.calls.at(-1)[0]).toContain(`matching id:${o(1).id}`);
+    expect(ctx.ui.notify.mock.calls.at(-1)[0]).toContain("drop marker: drop");
     await expect(command.handler("diagnostics limit:1000", ctx)).rejects.toThrow("1–25");
     ctx.sessionManager.getSessionId = () => { throw new Error("extension ctx is stale"); };
     expect(() => hooks.get("context")!({ messages: [{ role: "compactionSummary", summary }] }, ctx)).not.toThrow();

@@ -137,13 +137,16 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
         const raw = Array.isArray(args) ? args.join(" ") : typeof args === "string" ? args : "";
         const tokens = raw.trim().split(/\s+/).slice(1);
         let offset = 0, limit = 10;
+        let id: string | undefined;
         for (const token of tokens) {
+          const memoryId = /^id:([a-f0-9]{12})$/i.exec(token);
+          if (memoryId) { id = memoryId[1]; continue; }
           const match = /^(offset|limit):(\d+)$/.exec(token);
-          if (!match) throw new Error("Usage: /blackhole-memory diagnostics [offset:N] [limit:1–25]");
+          if (!match) throw new Error("Usage: /blackhole-memory diagnostics [id:MEMORY_ID] [offset:N] [limit:1–25]");
           if (match[1] === "offset") offset = Number(match[2]); else limit = Number(match[2]);
         }
         if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(limit) || limit < 1 || limit > 25) throw new Error("Invalid diagnostic page; limit is 1–25.");
-        ctx.ui.notify(renderMemoryDiagnostics(memoryDiagnostics(entries, runtime.lastMemoryContext, sessionId), offset, limit), "info");
+        ctx.ui.notify(renderMemoryDiagnostics(memoryDiagnostics(entries, runtime.lastMemoryContext, sessionId), offset, limit, id), "info");
         return;
       }
 
