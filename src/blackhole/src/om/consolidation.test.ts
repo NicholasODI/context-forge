@@ -207,3 +207,34 @@ describe("successful empty reflection review watermark", () => {
     expect(anyStageDue(s.entries, s.runtime)).toBe(true);
   });
 });
+
+it("rearms an empty pressure review when a new replacement reflection becomes available", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observeAfterTokens: 1e9, reflectAfterTokens: 1e9, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Preserve source evidence. ".repeat(20);
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
+  expect(s.stream).not.toHaveBeenCalled(); // no replacement evidence, no model request
+  expect(anyStageDue(s.entries, s.runtime)).toBe(false);
+  s.entries.push({ type: "custom", id: "new-replacement", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: item.content, supportingObservationIds: [item.id], tokenCount: 100 },
+  ] } });
+  expect(anyStageDue(s.entries, s.runtime)).toBe(true); // observation ids did not change
+});
+
+it("aborts repeated rejected dropper proposals without recording drops or advancing coverage", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25, agentMaxTurns: 16 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Preserve source evidence. ".repeat(20);
+  s.entries.push({ type: "custom", id: "replacement", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: item.content, supportingObservationIds: [item.id], tokenCount: 100 },
+  ] } });
+  const stream = vi.fn(() => response({ ids: ["000000000002"], replacements: {}, reason: "Wrong ID namespace", complete: "True" }, undefined, "drop_observations"));
+  s.ctx.modelRegistry.streamSimple = stream;
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("abort");
+  expect(stream).toHaveBeenCalledTimes(2);
+  expect(s.pi.appendEntry).not.toHaveBeenCalled();
+  expect(s.runtime.getCursor("dropper")).toBeUndefined();
+  expect(s.runtime.lastDropperError).toContain("no progress in two consecutive tool calls");
+});

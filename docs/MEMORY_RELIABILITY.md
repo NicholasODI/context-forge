@@ -25,7 +25,8 @@ by the main agent; their filesystem/ledger operations make no provider calls.
   checks do not claim reviewed coverage.
 
 Observer inputs omit assistant thinking to reduce repeated worker input. Raw
-session evidence remains available through recall. The reflector keeps its existing completion behavior. The dropper supports
+session evidence remains available through recall. The reflector keeps its
+existing completion behavior. The dropper supports
 `complete: true` on a validated final `drop_observations` call, terminating
 immediately without another provider confirmation turn. A final empty batch
 (`ids: []`, `replacements: {}`, a reason, and `complete: true`) means keep all
@@ -34,6 +35,23 @@ or a provider error/output cut cannot authorize that close. Legacy normal text
 stops remain supported; a bare terminal `toolUse` without a validated close is
 still incomplete. Successful dropper stage completion clears its previous error
 from status.
+
+Dropper prompts separate candidate observation IDs from replacement reflection
+IDs and show up to eight structurally eligible replacement references on each
+candidate line. Candidates with no provided citation coverage, or pinned/critical
+status, are marked KEEP. The same rendering is priced in input-fit checks.
+Replacement links establish citation eligibility, not semantic equivalence.
+
+Rejected proposals return bounded per-ID explanations and eligible references,
+including wrong ID namespace, missing/mistyped replacement keys, and unsupported
+citations. Two consecutive tool executions that neither add valid candidates nor
+finish explicitly fail the invocation without advancing coverage. This bounds
+repeated rejected proposals; host schema-validation failures still use the normal
+turn/deadline guards. The completion field accepts JSON booleans and the four
+explicit compatibility strings `true`, `false`, `True`, `False`; false strings
+are never interpreted by JavaScript truthiness. Prompts request canonical JSON
+booleans. Empty pressure results are invalidated by new replacement evidence,
+pin policies, or relevant budget changes as well as observation-pool changes.
 
 ## Protect or correct session memory
 
