@@ -18,15 +18,22 @@ export const DropObservationsSchema = {
     ids: {
       type: "array",
       minItems: 1,
+      maxItems: 128,
       items: { type: "string", minLength: 1 },
     },
-    // Optional on purpose: a model that omits the reason must lose nothing.
-    reason: { type: "string" },
+    // Required for an auditable removal; omitted reasons cannot authorize drops.
+    reason: { type: "string", minLength: 1, maxLength: 1000 },
+    replacements: {
+      type: "object",
+      description: "For each proposed observation ID, give IDs of provided reflections that preserve it with equivalent fidelity.",
+      additionalProperties: { type: "array", minItems: 1, maxItems: 8, items: { type: "string" } },
+    },
   },
-  required: ["ids"],
+  required: ["ids", "replacements", "reason"],
 };
 
 export interface DropObservationsArgs {
   ids: string[];
-  reason?: string;
+  reason: string;
+  replacements: Record<string, string[]>;
 }

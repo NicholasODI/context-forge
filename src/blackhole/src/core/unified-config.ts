@@ -198,8 +198,8 @@ export interface UnifiedConfig {
   compactAfterPresets?: Record<string, PresetAnchorDef[]>;
   /** Full-fold pressure and max estimated rendered observation-line tokens. */
   observationsPoolMaxTokens: number;
-  /** Cap for rendered reflection lines in the compaction output (newest-first
-   *  keep). Reflections otherwise accumulate without bound across compactions.
+  /** Cap for rendered reflection lines (pins, supporting-fact importance, recency).
+   * Reflections otherwise accumulate without bound across compactions.
    *  0 disables the cap. Default 8000. */
   reflectionsPoolMaxTokens: number;
   /** Treat every compaction as a full-fold boundary so early reflections/drops
@@ -208,12 +208,8 @@ export interface UnifiedConfig {
   /** Target token budget for the observation pool (dropper aims here).
    *  Optional; defaults to half of observationsPoolMaxTokens when unset.
    *  Must be less than observationsPoolMaxTokens.
-   *
-   *  NOTE: Ported from upstream as forward-compat (no-op in our pool algorithm).
-   *  Upstream renamed budgetTokens→targetTokens (52b5844) and uses this
-   *  for their tokensOverTarget / avgTokensPerObservation drop calculation.
-   *  We keep our ratio-based urgency algorithm; this knob exists so future
-   *  lockstep iterations don't diverge on the config shape. */
+   * Pruning stops when safe selected records meet this rendered-token target;
+   * safety vetoes and the per-run count cap may leave the pool above it. */
   observationsPoolTargetTokens: number;
   /** Max prompt tokens for reflector model input (rolling window cap). */
   reflectorInputMaxTokens: number;
@@ -236,6 +232,8 @@ export interface UnifiedConfig {
   observerPreambleMaxTokens: number;
   /** Shared turn cap for background memory agents. */
   agentMaxTurns: number;
+  /** Per-worker generation cap shared by preflight and dispatch. */
+  workerOutputMaxTokens: number;
   /** Body-idle timeout for background provider streams. Uses pi's default when unset;
    *  set to 0 to explicitly disable the wrapper. */
   providerIdleTimeoutMs?: number;
@@ -330,11 +328,12 @@ export const DEFAULTS: UnifiedConfig = {
   observerChunkMaxTokens: 40_000,
   observerPreambleMaxTokens: 0,
   agentMaxTurns: 16,
+  workerOutputMaxTokens: 4096,
   // Optional knobs must still be DEFAULTS members (as undefined) or
   // ConfigManager.save() — which diffs against Object.keys(DEFAULTS) —
   // silently drops them when saving from the settings modal.
   providerIdleTimeoutMs: undefined,
-  workerAttemptTimeoutMs: undefined,
+  workerAttemptTimeoutMs: 600_000,
   cacheRetention: undefined,
 
   memory: true,
@@ -640,6 +639,7 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
     "observerChunkMaxTokens",
     "observerPreambleMaxTokens",
     "agentMaxTurns",
+    "workerOutputMaxTokens",
     "providerIdleTimeoutMs",
   ] as const;
 

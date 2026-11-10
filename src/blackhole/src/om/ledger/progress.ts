@@ -1,6 +1,8 @@
 import { estimateEntryTokens, getUsageTokens } from "../tokens.js";
 import type { PendingOMState } from "../pending.js";
 import { foldLedger } from "./fold.js";
+import { observationRenderedTokens } from "./render-summary.js";
+import { applyMemoryPolicies } from "./policy.js";
 import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
@@ -9,6 +11,8 @@ import {
   isObservationsRecordedData,
   isObservationsUnanchoredData,
   isReflectionsRecordedData,
+  isObservation,
+  isReflection,
   type Entry,
   type Observation,
   type Reflection,
@@ -208,7 +212,28 @@ export function livePoolObservations(entries: Entry[], pending?: PendingOMState)
       if (typeof id === "string") pool.delete(id);
     }
   }
-  return [...pool.values()];
+  return applyMemoryPolicies(entries, [...pool.values()], folded.reflections).observations;
+}
+
+/** Active branch/pending reflections, with corrections applied after merging. */
+export function livePoolReflections(entries: Entry[], pending?: PendingOMState, additional: Reflection[] = []): Reflection[] {
+  const folded = foldLedger(entries);
+  const observations = new Map(folded.observations.map(o => [o.id, o]));
+  for (const batch of [...(pending?.observationBatches ?? []), ...(pending?.unanchoredBatches ?? [])]) {
+    const data = batch.data as { observations?: unknown } | undefined;
+    if (Array.isArray(data?.observations)) for (const o of data.observations.filter(isObservation)) {
+      if (!observations.has(o.id)) observations.set(o.id, o);
+    }
+  }
+  const reflections = new Map(folded.reflections.map(r => [r.id, r]));
+  for (const batch of pending?.reflectionBatches ?? []) {
+    const data = batch.data as { reflections?: unknown } | undefined;
+    if (Array.isArray(data?.reflections)) for (const r of data.reflections.filter(isReflection)) {
+      if (!reflections.has(r.id)) reflections.set(r.id, r);
+    }
+  }
+  for (const r of additional) if (!reflections.has(r.id)) reflections.set(r.id, r);
+  return applyMemoryPolicies(entries, [...observations.values()], [...reflections.values()]).reflections;
 }
 
 /**
@@ -223,9 +248,8 @@ export function livePoolObservations(entries: Entry[], pending?: PendingOMState)
  * command pass pending in manual mode, while the footer P gauge deliberately
  * measures the branch alone (#120).
  *
- * Sums the stored `tokenCount` (content-only, recorded at write time with the
- * CJK-aware `estimateStringTokens`, #106) so all callers move together if that
- * basis ever changes.
+ * Sums conservative rendered-line estimates, including ids and metadata,
+ * so targets, pressure, and pruning share the summary's actual cost basis.
  */
 export function observationPoolTokens(
   entries: Entry[],
@@ -233,7 +257,7 @@ export function observationPoolTokens(
 ): { tokens: number; count: number } {
   const pool = livePoolObservations(entries, pending);
   return {
-    tokens: pool.reduce((sum, observation) => sum + observation.tokenCount, 0),
+    tokens: pool.reduce((sum, observation) => sum + observationRenderedTokens(observation), 0),
     count: pool.length,
   };
 }

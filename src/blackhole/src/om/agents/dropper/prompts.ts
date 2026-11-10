@@ -26,7 +26,7 @@ Relevance guidance. Relevance is importance/resistance, not an absolute keep/dro
 - low: consider first, but drop only when it carries no unique detail, decision, state, error, identifier, or user-specific fact.
 - medium: drop when redundant with reflections or other observations, or when the work state is clearly obsolete.
 - high: drop only when clearly superseded or already captured by a reflection with equivalent fidelity.
-- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Critical observations may be dropped only with strong semantic evidence such as age plus partial/strong reflection coverage, supersession by newer memory, redundancy, or clear obsolescence.
+- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Pinned and critical observations cannot be dropped by this worker. Explicit corrections/supersession require the memory_policy tool.
 
 User assertions and concrete completions must be preserved unless a current reflection or newer observation preserves the exact assertion/completion and its important details with equivalent fidelity.
 
@@ -39,6 +39,8 @@ Preservation floor. Regardless of relevance label, budget pressure, coverage, or
 - Dates of specific events, deadlines, meetings, migrations, or incidents.
 - Current unresolved blockers, TODOs, partial work, or decisions waiting on the user.
 - Non-standard user terminology or unusual phrasing needed for future recognition.
+
+Every drop_observations call must include a nonempty reason and a replacements map: each proposed observation id maps to provided reflection ids that both cite it and preserve its exact durable meaning. Never invent replacement ids. If no such reflection exists, keep the observation. Citation alone is not semantic equivalence.
 
 What you cannot do:
 - You cannot merge observations.

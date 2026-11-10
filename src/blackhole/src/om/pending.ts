@@ -88,7 +88,7 @@ export interface PendingOMState {
   /** Pipeline progress cursors — persist across restarts and fork recovery. */
   cursors?: {
     observer?: { entryId: string; state: string };
-    reflector?: { entryId: string; state: string };
+    reflector?: { entryId: string; state: string; reviewSignature?: string };
     dropper?: { entryId: string; state: string; activePoolSignature?: string };
   };
 }

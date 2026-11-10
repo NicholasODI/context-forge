@@ -14,13 +14,14 @@ import {
   compile,
   compileSegment,
   extractRecallNote,
+  extractSection,
   stripOMContent,
   stripRecallNotes,
 } from "../core/summarize";
 import { buildAppendOnlyDetails, coverageForMessages } from "../core/compaction-chain.js";
 import { getModelProvider, matchesSkippedProvider } from "../core/provider-skip.js";
 import type { PiVccCompactionDetails } from "../details";
-import { buildCompactionProjection, renderSummary } from "../om/ledger/index.js";
+import { buildCompactionProjection, renderSummary, PinnedMemoryOverflowError } from "../om/ledger/index.js";
 import type { Runtime } from "../om/runtime.js";
 import { debugLog } from "../om/debug-log.js";
 import { effectiveContextWindow } from "../om/model-budget.js";
@@ -711,12 +712,18 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime) 
       memoryEnabled: omRuntime.config.memory !== false,
     });
     if (omRuntime.config.memory !== false) {
-      const projection = buildCompactionProjection(branchEntries as any[], firstKeptEntryId, {
+      let projection;
+      try { projection = buildCompactionProjection(branchEntries as any[], firstKeptEntryId, {
         observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens,
         reflectionsPoolMaxTokens:
           omRuntime.config.reflectionsPoolMaxTokens ?? DEFAULTS.reflectionsPoolMaxTokens,
         fullFoldAlways: omRuntime.config.fullFoldAlways,
-      });
+        taskQuery: extractSection(summary, "Session Goal"),
+      }); } catch (error) {
+        if (!(error instanceof PinnedMemoryOverflowError)) throw error;
+        ctx.ui.notify(error.message, "warning");
+        return { cancel: true };
+      }
       omContent = renderSummary(projection.reflections, projection.observations);
       omDetails = projection.details;
       omHasContent = projection.reflections.length > 0 || projection.observations.length > 0;

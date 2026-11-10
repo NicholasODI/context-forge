@@ -2,7 +2,7 @@
  * Ledger folding — deduplicates observations/reflections and applies tombstones.
  *
  * Upstream: https://github.com/elpapi42/pi-observational-memory (src/session-ledger/fold.ts)
- * Unmodified.
+ * Modified: explicit memory policies and a separate active-reflection view.
  */
 import {
   isObservationsDroppedData,
@@ -18,6 +18,7 @@ import {
   type Reflection,
 } from "./types.js";
 import { debugLog } from "../debug-log.js";
+import { applyMemoryPolicies, OM_MEMORY_POLICY } from "./policy.js";
 
 export type FoldLedgerOptions = {
   /** Fold entries from branch root through this entry id, inclusive. Omit to fold through branch tip. */
@@ -33,6 +34,7 @@ export type FoldedLedger = {
   droppedObservationIds: Set<string>;
   /** All first-valid reflection records encountered through the fold boundary. */
   reflections: Reflection[];
+  activeReflections: Reflection[];
   /** All first-valid observation records by id, including dropped observations. */
   observationsById: Map<string, Observation>;
   /** All first-valid reflection records by id. */
@@ -66,6 +68,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
   for (let i = 0; i <= endIdx; i++) {
     const entry = entries[i];
     if (!entry) continue;
+    if (isCustomEntry(entry, OM_MEMORY_POLICY)) continue;
 
     if (isCustomEntry(entry, OM_OBSERVATIONS_RECORDED)) {
       if (!isObservationsRecordedData(entry.data)) continue;
@@ -126,16 +129,18 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
   }
 
   const observations = Array.from(observationsById.values());
-  const activeObservations = observations.filter(
+  const reflections = Array.from(reflectionsById.values());
+  const active = applyMemoryPolicies(entries, observations, reflections, endIdx);
+  const activeObservations = active.observations.filter(
     (observation) => !droppedObservationIds.has(observation.id),
   );
-  const reflections = Array.from(reflectionsById.values());
 
   return {
     observations,
     activeObservations,
     droppedObservationIds,
     reflections,
+    activeReflections: active.reflections,
     observationsById,
     reflectionsById,
   };

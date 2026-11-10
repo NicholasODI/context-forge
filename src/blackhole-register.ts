@@ -23,6 +23,7 @@ import { registerCompactFailedHook } from "./blackhole/src/hooks/compact-failed.
 import { registerCompactionContextHook } from "./blackhole/src/hooks/compaction-context.ts";
 import { registerPreCompactionOutput } from "./blackhole/src/hooks/cosmetic-output.ts";
 import { registerRecallTool } from "./blackhole/src/tools/recall.ts";
+import { registerMemoryPolicyTool } from "./blackhole/src/commands/memory-policy.ts";
 import { scaffoldSettings } from "./blackhole/src/core/settings.ts";
 import { registerPiVccCommand } from "./blackhole/src/commands/pi-vcc.ts";
 import { registerMemoryCommand } from "./blackhole/src/commands/memory.ts";
@@ -83,5 +84,6 @@ export async function registerBlackholeMechanisms(
 	}
 	if (mechanisms.unifiedRecall) {
 		registerRecallTool(pi, omRuntime);
+		registerMemoryPolicyTool(pi);
 	}
 }

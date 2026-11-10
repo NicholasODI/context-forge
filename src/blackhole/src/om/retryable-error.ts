@@ -92,6 +92,21 @@ export class WorkerStreamError extends Error {
   }
 }
 
+/** Local worker protocol/setup failures must not rotate through provider models. */
+export class WorkerProtocolError extends Error {
+  override readonly name = "WorkerProtocolError";
+}
+
+export class WorkerSetupError extends Error {
+  override readonly name = "WorkerSetupError";
+}
+
+export function isWorkerSetupError(error: unknown): boolean {
+  // Native TypeErrors can also mean a transient fetch failure; only tagged
+  // local failures bypass provider fallback handling.
+  return error instanceof WorkerProtocolError || error instanceof WorkerSetupError;
+}
+
 /**
  * A symbol rather than a field so the count cannot collide with an error's own
  * properties and cannot surface when the error is spread into a log payload.

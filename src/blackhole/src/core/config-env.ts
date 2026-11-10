@@ -173,6 +173,7 @@ export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   observerChunkMaxTokens: "PI_BLACKHOLE_OBSERVER_CHUNK_MAX_TOKENS",
   observerPreambleMaxTokens: "PI_BLACKHOLE_OBSERVER_PREAMBLE_MAX_TOKENS",
   agentMaxTurns: "PI_BLACKHOLE_AGENT_MAX_TURNS",
+  workerOutputMaxTokens: "PI_BLACKHOLE_WORKER_OUTPUT_MAX_TOKENS",
   // Non-negative integer (0 = disabled, unset = inherit pi default)
   providerIdleTimeoutMs: {
     var: "PI_BLACKHOLE_PROVIDER_IDLE_TIMEOUT_MS",
@@ -182,7 +183,7 @@ export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
     },
   },
   // Non-negative integer up to Node's timer maximum (0 = disabled, unset =
-  // no hard elapsed deadline)
+  // inherit the configured/default elapsed deadline)
   workerAttemptTimeoutMs: {
     var: "PI_BLACKHOLE_WORKER_ATTEMPT_TIMEOUT_MS",
     parse: (raw: string) => {

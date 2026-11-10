@@ -72,12 +72,17 @@ function measureStatic(system: string, schema: unknown): number {
 let staticPromptTokens: Record<WorkerPromptStage, number> | undefined;
 
 function getStaticPromptTokens(): Record<WorkerPromptStage, number> {
-  staticPromptTokens ??= {
+  if (staticPromptTokens) return staticPromptTokens;
+  const measured = {
     observer: measureStatic(OBSERVER_SYSTEM, RecordObservationsSchema),
     reflector: measureStatic(REFLECTOR_SYSTEM, RecordReflectionsSchema),
     dropper: measureStatic(DROPPER_SYSTEM, DropObservationsSchema),
   };
-  return staticPromptTokens;
+  if ([OBSERVER_SYSTEM, REFLECTOR_SYSTEM, DROPPER_SYSTEM].every(p => typeof p === "string" && p.length > 0) &&
+      [RecordObservationsSchema, RecordReflectionsSchema, DropObservationsSchema].every(s => s && typeof s === "object" && !Array.isArray(s))) {
+    staticPromptTokens = measured;
+  }
+  return measured;
 }
 
 /** Measured static first-turn overhead (system + tool schema + framing). */
@@ -89,11 +94,12 @@ export function workerStaticPromptTokens(stage: WorkerPromptStage): number {
  * Output allowance sharing the context window with the prompt. The agent loop
  * caps generation at boundedMaxTokens, so a fit-check that ignores output
  * admits prompts the provider then rejects. An unknown model assumes the
- * maximum allowance (safe direction for a pre-flight guard).
+ * configured allowance (safe direction for a pre-flight guard).
  */
-export function workerOutputReserveTokens(model: Model<any> | undefined): number {
-  if (!model) return AGENT_LOOP_MAX_TOKENS;
-  return boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS);
+export function workerOutputReserveTokens(model: Model<any> | undefined, cap = 4096): number {
+  const requested = Number.isFinite(cap) && cap > 0 ? Math.min(AGENT_LOOP_MAX_TOKENS, Math.floor(cap)) : 4096;
+  if (!model) return requested;
+  return boundedMaxTokens(model, requested);
 }
 
 /**
@@ -116,12 +122,12 @@ export const MIN_WORKER_OUTPUT_ALLOWANCE_TOKENS = 1024;
  * reporting maxTokens near the window — and small windows that can never
  * host the full allowance — would otherwise either disable the stages or
  * dispatch an unhonorable cap), floored at the minimum usable generation cap
- * above. An unknown model assumes the maximum allowance (safe direction for
+ * above. An unknown model assumes the configured allowance (safe direction for
  * a pre-flight guard). A non-finite window falls back to the reserve: there
  * is no window to clamp against.
  */
-export function workerOutputAllowance(window: number, model: Model<any> | undefined): number {
-  const reserve = workerOutputReserveTokens(model);
+export function workerOutputAllowance(window: number, model: Model<any> | undefined, cap = 4096): number {
+  const reserve = workerOutputReserveTokens(model, cap);
   if (!Number.isFinite(window) || window <= 0) return reserve;
   return Math.max(
     Math.min(MIN_WORKER_OUTPUT_ALLOWANCE_TOKENS, reserve),
@@ -134,6 +140,6 @@ export function workerOutputAllowance(window: number, model: Model<any> | undefi
  * allowance minus safety margin. Compare the stage's estimated input
  * (content + preamble + static + turn headroom) against this.
  */
-export function workerInputBudget(window: number, model: Model<any> | undefined): number {
-  return Math.max(0, window - workerOutputAllowance(window, model) - WORKER_SAFETY_MARGIN_TOKENS);
+export function workerInputBudget(window: number, model: Model<any> | undefined, cap = 4096): number {
+  return Math.max(0, window - workerOutputAllowance(window, model, cap) - WORKER_SAFETY_MARGIN_TOKENS);
 }

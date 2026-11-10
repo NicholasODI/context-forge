@@ -8,11 +8,12 @@
  * - 30s retry gate prevents repeated failed runs (isConsolidationRetryGated).
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import { matchesSkippedProvider } from "../core/provider-skip.js";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { type Config, type ConfiguredModel } from "./config.js";
 import { debugLog, withDebugLogContext } from "./debug-log.js";
-import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runtime.js";
+import { type ResolveResult, type Runtime, type RuntimeGeneration, type PipelineCursor } from "./runtime.js";
 import { withProviderAttributionHeaders } from "./provider-stream.js";
 import { runWorkerAttempt, WorkerAttemptTimeoutError } from "./worker-attempt.js";
 import {
@@ -24,9 +25,10 @@ import {
   WorkerStreamError,
   workerStreamErrorMessage,
   type ConsolidationWorker,
+  isWorkerSetupError,
 } from "./retryable-error.js";
 import { effectiveContextWindow } from "./model-budget.js";
-import { maxDropCountForPool, selectDropCandidates } from "./agents/dropper/selection.js";
+import { maxDropCountForPool, selectDropCandidates, dropTargetTokens, attachDropEvidence, type DropEvidence, type DropSelection } from "./agents/dropper/selection.js";
 import {
   coverageTierForObservation,
   observationToDropperLine,
@@ -71,9 +73,11 @@ import {
   latestCoverageIndex,
   latestCoverageMarkerId,
   livePoolObservations,
+  livePoolReflections,
   observationsCreatedAfterIndex,
   observationPoolTokens,
   observationToSummaryLine,
+  observationRenderedTokens,
   rawTokensAfterIndex,
   rawTokensSinceDropCoverage,
   rawTokensSinceObservationCoverage,
@@ -133,6 +137,11 @@ type ReflectorStageResult = {
 // Each call to resolveModel tries all non-cooldown candidates.  If the agent throws
 // a retryable error, we record cooldown and call resolveModel again (up to this many times).
 const MAX_STAGE_ATTEMPTS = 10;
+
+function workerFailure(worker: string, attempts: number, model: string, firstError: unknown): Error {
+  const cause = firstError instanceof Error ? `${firstError.name}: ${firstError.message}` : String(firstError ?? "unknown failure");
+  return new Error(`${worker} failed after ${attempts} attempt(s); last model ${model}; first error: ${cause}`, { cause: firstError });
+}
 
 /**
  * How many drain batches one observer pipeline run may add after its initial
@@ -359,7 +368,15 @@ export function reflectionAccumulatedTokens(
   entries: Entry[],
   config: Config,
   pending?: PendingOMState,
+  cursor?: PipelineCursor,
 ): number {
+  if (cursor?.reviewSignature && (cursor.state === "empty" || cursor.state === "recorded")) {
+    const idx = entryIndexForId(entries, cursor.entryId);
+    if (idx >= 0) {
+      const marker = isManualMode(config) ? pending?.reflection?.coversUpToId : latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
+      return rawTokensAfterIndex(entries, Math.max(idx, entryIndexForId(entries, marker)));
+    }
+  }
   if (isManualMode(config)) {
     if (pending?.reflection?.coversUpToId) {
       const idx = entryIndexForId(entries, pending.reflection.coversUpToId);
@@ -369,6 +386,24 @@ export function reflectionAccumulatedTokens(
     return rawTokensSinceObservationCoverage(entries);
   }
   return rawTokensSinceReflectionCoverage(entries);
+}
+
+/** Changes only when actual observation input or reflector policy changes. */
+export function reflectionReviewSignature(entries: Entry[], config: Config, pending?: PendingOMState): string {
+  const observations = livePoolObservations(entries, pending);
+  return createHash("sha256").update(JSON.stringify({
+    root: entries[0]?.id,
+    observations: observations.map(o => [o.id, o.content, o.relevance, o.pinned ?? false, o.sourceEntryIds]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    model: config.reflectorModel ?? config.model,
+    fallbacks: config.reflectorFallbackModels,
+    prompt: 1,
+  })).digest("hex");
+}
+
+function reflectionAlreadyReviewed(entries: Entry[], runtime: Runtime, pending?: PendingOMState): boolean {
+  const cursor = runtime.getCursor("reflector");
+  return !!cursor?.reviewSignature && (cursor.state === "empty" || cursor.state === "recorded") &&
+    entryIndexForId(entries, cursor.entryId) >= 0 && cursor.reviewSignature === reflectionReviewSignature(entries, runtime.config, pending);
 }
 
 /** Cursor-aware stage-due check.  Uses cursors when available; falls back to
@@ -398,7 +433,8 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
   // reflectionAccumulatedTokens), never on the cursor: a persisted not_due/
   // skipped cursor must not reset or perpetuate a lost accumulation anchor.
   const reflectorDue = (() => {
-    if (reflectionAccumulatedTokens(entries, config, pending) < config.reflectAfterTokens) {
+    if (reflectionAlreadyReviewed(entries, runtime, pending) || livePoolObservations(entries, pending).length === 0) return false;
+    if (reflectionAccumulatedTokens(entries, config, pending, cursors.reflector) < config.reflectAfterTokens) {
       return false;
     }
     // Above threshold: due when unprocessed observations exist beyond valid
@@ -442,6 +478,7 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
       : (() => {
           // Live active pool, plus pending observation batches in manual mode.
           const poolTokens = observationPoolTokens(entries, pending).tokens;
+          if (poolTokens <= dropTargetTokens(config.observationsPoolMaxTokens, config.observationsPoolTargetTokens)) return false;
           const fullnessVsPool =
             config.observationsPoolMaxTokens > 0
               ? poolTokens / config.observationsPoolMaxTokens
@@ -1159,20 +1196,8 @@ export async function runObserverStage(
   );
   if (isManualMode(runtime.config)) {
     const pendingCtx = readPendingState(sessionId);
-    const accumulatedReflections = (pendingCtx.reflectionBatches ?? []).flatMap(
-      (b) => (b.data as any).reflections ?? [],
-    );
-    const accumulatedObservations = pendingBufferedObservations(pendingCtx);
-
-    const allObservations = [...memory.observations, ...accumulatedObservations];
-    priorObservations = selectPriorObservations(allObservations, preambleMaxTokens).map(
-      observationToSummaryLine,
-    );
-
-    const allReflections = [...memory.reflections, ...accumulatedReflections];
-    priorReflections = selectPriorReflections(allReflections, preambleMaxTokens).map(
-      reflectionToSummaryLine,
-    );
+    priorObservations = selectPriorObservations(livePoolObservations(entries, pendingCtx), preambleMaxTokens).map(observationToSummaryLine);
+    priorReflections = selectPriorReflections(livePoolReflections(entries, pendingCtx), preambleMaxTokens).map(reflectionToSummaryLine);
   }
 
   // Attempt-invariant prompt overhead, measured once: the rendered preamble
@@ -1236,7 +1261,7 @@ export async function runObserverStage(
     if (!bestFit) return "abort";
     const bestModel = bestFit.resolved.model as any;
     const shrinkBudget =
-      workerInputBudget(bestFit.ctx, bestModel) -
+      workerInputBudget(bestFit.ctx, bestModel, runtime.config.workerOutputMaxTokens) -
       observerStaticTokens -
       preambleTokens -
       WORKER_TURN_HEADROOM_TOKENS;
@@ -1364,6 +1389,7 @@ export async function runObserverStage(
   };
   let attempt = 0;
   let firstAttemptError: unknown;
+  let lastAttemptModel = "unresolved";
   let sizeSkips = 0;
   while (attempt < MAX_STAGE_ATTEMPTS) {
     const resolved = await resolveModel("observer");
@@ -1425,7 +1451,7 @@ export async function runObserverStage(
     if (!bestFit || effectiveObsCtx > bestFit.ctx) bestFit = { resolved, ctx: effectiveObsCtx };
     const observerEstimatedInput =
       chunkTokens + preambleTokens + observerStaticTokens + WORKER_TURN_HEADROOM_TOKENS;
-    const observerInputBudget = workerInputBudget(effectiveObsCtx, resolved.model as any);
+    const observerInputBudget = workerInputBudget(effectiveObsCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
     if (observerEstimatedInput > observerInputBudget) {
       debugLog("observer.context_window_exceeded", {
         estimatedInput: observerEstimatedInput,
@@ -1462,6 +1488,7 @@ export async function runObserverStage(
 
     try {
       attempt += 1;
+      lastAttemptModel = `${resolved.model.provider}/${resolved.model.id}`;
       const { runObserver } = await import("./agents/observer/agent.js");
       const result = await runWorkerAttempt(
         "observer",
@@ -1477,7 +1504,7 @@ export async function runObserverStage(
               sessionId,
             ),
             env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveObsCtx, resolved.model as any),
+            maxOutputTokens: workerOutputAllowance(effectiveObsCtx, resolved.model as any, runtime.config.workerOutputMaxTokens),
             priorReflections,
             priorObservations,
             chunk,
@@ -1724,7 +1751,11 @@ export async function runObserverStage(
       return continueSources();
     } catch (error) {
       if (!runtime.isGenerationActive(generation)) return "abort";
-      firstAttemptError = error;
+      firstAttemptError ??= error;
+      if (isWorkerSetupError(error)) {
+        runtime.recordConsolidationStageError(ctx, "observer", error);
+        return "abort";
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("observer.stale_ctx", { error: String(error) });
         return "abort";
@@ -1736,9 +1767,14 @@ export async function runObserverStage(
       // less output too. A session model has no fallback to advance to, so it
       // falls through to the break-glass below instead.
       if (error instanceof WorkerStreamError && error.lengthCut && !error.turnCapExhausted) {
+        if (!stageModelForThinking && chunkEntries.length > 1) {
+          const halved = halveChunkForTurnCap({ discarded: getDiscardedCount(error) });
+          if (halved === "pending_skip") return "continue";
+          if (halved === "halved") continue;
+        }
         const candidateConfig = stageModelForThinking;
         if (candidateConfig) {
-          const outputAllowance = workerOutputAllowance(effectiveObsCtx, resolved.model as any);
+          const outputAllowance = workerOutputAllowance(effectiveObsCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
           debugLog("observer.output_allowance_exceeded", {
             outputAllowance,
             model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
@@ -1822,7 +1858,7 @@ export async function runObserverStage(
       // Candidates differ — they cool down and the fallback chain takes over.
       if (
         !candidateConfig &&
-        (error instanceof WorkerAttemptTimeoutError ||
+        (attempt >= 2 || error instanceof WorkerAttemptTimeoutError ||
           (error instanceof WorkerStreamError && (error.turnCapExhausted || error.lengthCut)))
       )
         break;
@@ -1835,17 +1871,7 @@ export async function runObserverStage(
   runtime.recordConsolidationStageError(
     ctx,
     "observer",
-    new Error(
-      "Observer: all model candidates exhausted" +
-        (firstAttemptError === undefined
-          ? ""
-          : `; first attempt: ${
-              firstAttemptError instanceof Error
-                ? `${firstAttemptError.name}: ${firstAttemptError.message}`
-                : String(firstAttemptError)
-            }`),
-      { cause: firstAttemptError },
-    ),
+    workerFailure("Observer", attempt, lastAttemptModel, firstAttemptError),
   );
   return "abort";
 }
@@ -1896,10 +1922,13 @@ function computeReflectorInput(
   const folded = foldLedger(entries);
   const pending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
   const lastReflectionIdx = pending ? -1 : latestCoverageIndex(entries, OM_REFLECTIONS_RECORDED);
-  const newObservations = pending
+  const rawObservations = pending
     ? pendingObservationsCreatedAfter(pending, entries, pending.reflection?.coversUpToId)
     : observationsCreatedAfterIndex(entries, lastReflectionIdx);
-  const newReflections = pending ? [] : reflectionsCreatedAfterIndex(entries, lastReflectionIdx);
+  const activeById = new Map(livePoolObservations(entries, pending).map(o => [o.id, o]));
+  const newObservations = rawObservations.filter(o => activeById.has(o.id)).map(o => activeById.get(o.id)!);
+  const activeRefs = new Map(folded.activeReflections.map(r => [r.id, r]));
+  const newReflections = pending ? [] : reflectionsCreatedAfterIndex(entries, lastReflectionIdx).filter(r => activeRefs.has(r.id)).map(r => activeRefs.get(r.id)!);
   const newItemsTokens =
     // Rendered lines, not bare content: the agent sends
     // observationToSummaryLine / reflectionToSummaryLine per item, and the
@@ -1928,17 +1957,8 @@ function computeReflectorInput(
   // Existing memory summaries for context (capped).
   // In manual mode, merge accumulated pending batches with
   // branch data (preserving pre-switch markers).
-  const sourceReflections = pending
-    ? [
-        ...folded.reflections,
-        ...(pending.reflectionBatches ?? []).flatMap(
-          (b: any) => (b.data as any)?.reflections ?? [],
-        ),
-      ]
-    : folded.reflections;
-  const sourceObservations = pending
-    ? [...folded.activeObservations, ...pendingBufferedObservations(pending)]
-    : folded.activeObservations;
+  const sourceReflections = livePoolReflections(entries, pending);
+  const sourceObservations = livePoolObservations(entries, pending);
   const existingReflectionsSummary = buildExistingReflectionsSummary(
     sourceReflections,
     Math.floor(runtime.config.reflectorInputMaxTokens * 0.15),
@@ -1988,6 +2008,9 @@ export async function runReflectorStage(
   }
   let reflectionTokens = 0;
   let observationCoverageId: string | undefined;
+  const reviewPending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
+  if (reflectionAlreadyReviewed(entries, runtime, reviewPending)) return { outcome: "continue", sameRunReflections: [] };
+  const reviewSignature = reflectionReviewSignature(entries, runtime.config, reviewPending);
   if (isManualMode(runtime.config)) {
     const pending = readPendingState(sessionId);
     // Check any accumulated batch for unprocessed observations, not just the latest.
@@ -2020,12 +2043,12 @@ export async function runReflectorStage(
     // Shared accumulation measure (anchors on pending reflection coverage,
     // falling back to observation coverage). A below-threshold result must
     // not advance the cursor or reset the anchor.
-    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, pending);
+    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, pending, runtime.getCursor("reflector"));
     if (reflectionTokens < runtime.config.reflectAfterTokens) {
       return { outcome: "continue", sameRunReflections: [] };
     }
   } else {
-    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config);
+    reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, undefined, runtime.getCursor("reflector"));
     if (reflectionTokens < runtime.config.reflectAfterTokens) {
       // Below threshold: do NOT advance the cursor. Advancing here would
       // reset the accumulation anchor and lose progress toward the threshold
@@ -2072,6 +2095,8 @@ export async function runReflectorStage(
         "reflector",
         observationCoverageId ?? entries.at(-1)?.id ?? "unknown",
         "empty",
+        undefined,
+        reviewSignature,
       );
       return { outcome: "continue", sameRunReflections: [] };
     }
@@ -2094,7 +2119,7 @@ export async function runReflectorStage(
         return { outcome: "abort", sameRunReflections: [] };
       }
     }
-    runtime.advanceCursor("reflector", data.coversUpToId, "recorded");
+    runtime.advanceCursor("reflector", data.coversUpToId, "recorded", undefined, reviewSignature);
     return {
       outcome: "continue",
       sameRunReflections: reflections,
@@ -2130,7 +2155,7 @@ export async function runReflectorStage(
       newReflectionsTokens +
       reflectorStaticTokens +
       WORKER_TURN_HEADROOM_TOKENS;
-    const batchBudget = workerInputBudget(best.ctx, bestModel);
+    const batchBudget = workerInputBudget(best.ctx, bestModel, runtime.config.workerOutputMaxTokens);
     const itemBudget = batchBudget - batchFixedOverhead;
     if (itemBudget <= 0) return { outcome: "abort", sameRunReflections: [] };
     const batches = planPrefixBatches(
@@ -2196,7 +2221,6 @@ export async function runReflectorStage(
     // commit still covers the whole pool at most once — never a prefix).
     // Total executed batches stay bounded by WORKER_SHRINK_MAX_BATCHES.
     const queue: Observation[][] = [...planned];
-    const isSessionBest = best.resolved.source !== "candidate";
     let batchRuns = 0;
     // Shared void tail for failures splitting cannot save: committing a
     // prefix would advance coverage over unreviewed observations, so the run
@@ -2250,7 +2274,7 @@ export async function runReflectorStage(
               apiKey: best.resolved.apiKey,
               headers: withProviderAttributionHeaders(bestModel, best.resolved.headers, sessionId),
               env: best.resolved.env,
-              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel),
+              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel, runtime.config.workerOutputMaxTokens),
               reflections: input.newReflections,
               observations: batch,
               existingReflectionsSummary: input.existingReflectionsSummary || undefined,
@@ -2284,7 +2308,6 @@ export async function runReflectorStage(
         // run with the cursor unmoved — classified like a normal attempt
         // failure so cooldowns and the retry gate behave identically.
         if (
-          !isSessionBest &&
           error instanceof WorkerStreamError &&
           (error.lengthCut || error.turnCapExhausted) &&
           batch.length > 1
@@ -2313,6 +2336,8 @@ export async function runReflectorStage(
   // cheap resolution-only iterations with their own continuation budget, so
   // a long chain of too-small models cannot starve the shrink pass.
   let attempt = 0;
+  let firstAttemptError: unknown;
+  let lastAttemptModel = "unresolved";
   let sizeSkips = 0;
   while (attempt < MAX_STAGE_ATTEMPTS) {
     const resolved = await resolveModel("reflector");
@@ -2354,7 +2379,7 @@ export async function runReflectorStage(
       input.summaryTokens +
       reflectorStaticTokens +
       WORKER_TURN_HEADROOM_TOKENS;
-    const reflectorInputBudget = workerInputBudget(effectiveRefCtx, resolved.model as any);
+    const reflectorInputBudget = workerInputBudget(effectiveRefCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
     if (reflectorEstimatedInput > reflectorInputBudget) {
       debugLog("reflector.context_window_exceeded", {
         estimatedInput: reflectorEstimatedInput,
@@ -2387,6 +2412,7 @@ export async function runReflectorStage(
 
     try {
       attempt += 1;
+      lastAttemptModel = `${resolved.model.provider}/${resolved.model.id}`;
       const { runReflector } = await import("./agents/reflector/agent.js");
       const result = await runWorkerAttempt(
         "reflector",
@@ -2402,7 +2428,7 @@ export async function runReflectorStage(
               sessionId,
             ),
             env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveRefCtx, resolved.model as any),
+            maxOutputTokens: workerOutputAllowance(effectiveRefCtx, resolved.model as any, runtime.config.workerOutputMaxTokens),
             reflections: input.newReflections,
             observations: input.newObservations,
             existingReflectionsSummary: input.existingReflectionsSummary || undefined,
@@ -2423,9 +2449,17 @@ export async function runReflectorStage(
     } catch (error) {
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
+      firstAttemptError ??= error;
+      if (isWorkerSetupError(error)) {
+        runtime.recordConsolidationStageError(ctx, "reflector", error);
+        return { outcome: "abort", sameRunReflections: [] };
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("reflector.stale_ctx", { error: String(error) });
         return { outcome: "abort", sameRunReflections: [] };
+      }
+      if (error instanceof WorkerStreamError && (error.lengthCut || error.turnCapExhausted) && !stageModelForThinking && bestFit) {
+        return runShrunkBatches(bestFit);
       }
       // Output-length cut on an input the preflight accepted: the output
       // allowance — not the model — is at fault, so this is a size miss, not
@@ -2436,7 +2470,7 @@ export async function runReflectorStage(
       if (error instanceof WorkerStreamError && error.lengthCut && !error.turnCapExhausted) {
         const candidateConfig = stageModelForThinking;
         if (candidateConfig) {
-          const outputAllowance = workerOutputAllowance(effectiveRefCtx, resolved.model as any);
+          const outputAllowance = workerOutputAllowance(effectiveRefCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
           debugLog("reflector.output_allowance_exceeded", {
             outputAllowance,
             model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
@@ -2479,7 +2513,7 @@ export async function runReflectorStage(
       // differ — they cool down and the fallback chain takes over.
       if (
         !candidateConfig &&
-        (error instanceof WorkerAttemptTimeoutError ||
+        (attempt >= 2 || error instanceof WorkerAttemptTimeoutError ||
           (error instanceof WorkerStreamError && (error.turnCapExhausted || error.lengthCut)))
       )
         break;
@@ -2490,7 +2524,7 @@ export async function runReflectorStage(
   runtime.recordConsolidationStageError(
     ctx,
     "reflector",
-    new Error("Reflector: all model candidates exhausted"),
+    workerFailure("Reflector", attempt, lastAttemptModel, firstAttemptError),
   );
   return { outcome: "abort", sameRunReflections: [] };
 }
@@ -2519,25 +2553,21 @@ function computeDropperInput(
   // post-drop delta there is nothing else to prune), cadence runs keep the
   // post-last-drop delta — pending batches in manual mode, branch markers
   // otherwise.
-  const newObservations = pressureRun
+  const rawObservations = pressureRun
     ? livePoolObservations(entries, pending)
     : pending
       ? pendingObservationsCreatedAfter(pending, entries, pending.dropped?.coversUpToId)
       : observationsCreatedAfterIndex(entries, lastDropIdx);
+  const activeById = new Map(livePoolObservations(entries, pending).map(o => [o.id, o]));
+  const newObservations = rawObservations.filter(o => activeById.has(o.id)).map(o => activeById.get(o.id)!);
   // In manual mode, merge accumulated reflection batches with
   // branch data (preserving pre-switch markers), matching the
   // dropper's full autoCompact context. Computed before the token pricing
   // below: the per-item cost is the dispatched dropper line, whose coverage
   // tier comes from this same reflection set.
-  const pendingReflections = pending
-    ? [
-        ...folded.reflections,
-        ...(pending.reflectionBatches ?? []).flatMap(
-          (b: any) => (b.data as any)?.reflections ?? [],
-        ),
-      ]
-    : folded.reflections;
-  const reflectionsForDropper = mergeReflections(pendingReflections, sameRunReflections);
+  const availableReflections = livePoolReflections(entries, pending, sameRunReflections);
+  const reflectionsForDropper = runtime.config.reflectionsPoolMaxTokens > 0
+    ? selectPriorReflections(availableReflections, runtime.config.reflectionsPoolMaxTokens) : availableReflections;
   const coverageById = reflectionCoverageMap(newObservations, reflectionsForDropper);
   const dropperNewObsTokens = newObservations.reduce(
     // Rendered dropper lines, not bare content: the agent sends
@@ -2707,7 +2737,7 @@ export async function runDropperStage(
 
   // Shared commit tail: normal and batched runs both advance the cursor at
   // most once, after all work for this invocation is done.
-  const commitDropperResult = (droppedIds: string[] | undefined): StageOutcome => {
+  const commitDropperResult = (droppedIds: DropSelection | undefined): StageOutcome => {
     const latestReflectionCoverageId = isManualMode(runtime.config)
       ? input.pending?.reflection?.coversUpToId
       : latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
@@ -2722,6 +2752,7 @@ export async function runDropperStage(
         ? buildObservationsDroppedData(droppedIds, coversUpToId)
         : undefined;
     if (data && coversUpToId) {
+      if (droppedIds?.proofs) data.proofs = droppedIds.proofs;
       if (isManualMode(runtime.config)) {
         savePendingDropped(sessionId, { coversUpToId, data });
       } else {
@@ -2764,7 +2795,7 @@ export async function runDropperStage(
     // Pool-wide pressure basis (stored counts, the same basis the trigger
     // and the agent use): every batch quotes these numbers.
     const poolTokens = input.newObservations.reduce(
-      (s: number, o: any) => s + (typeof o.tokenCount === "number" ? o.tokenCount : 0),
+      (s: number, o: any) => s + observationRenderedTokens(o),
       0,
     );
     const globalMaxDrops = maxDropCountForPool(
@@ -2772,6 +2803,7 @@ export async function runDropperStage(
       poolTokens,
       runtime.config.observationsPoolMaxTokens,
       runtime.config.dropperPoolFullnessThreshold,
+      runtime.config.observationsPoolTargetTokens,
     );
     // Fast path: nothing in the pool is droppable (all-critical, or an
     // under-target cadence delta). Commit the empty result without spending
@@ -2786,7 +2818,7 @@ export async function runDropperStage(
       dropperReflectionsTokens +
       dropperStaticTokens +
       WORKER_TURN_HEADROOM_TOKENS;
-    const batchBudget = workerInputBudget(best.ctx, bestModel);
+    const batchBudget = workerInputBudget(best.ctx, bestModel, runtime.config.workerOutputMaxTokens);
     const itemBudget = batchBudget - batchFixedOverhead;
     if (itemBudget <= 0) return "abort";
     // Priced as dispatched dropper lines against the pool-wide coverage map
@@ -2849,12 +2881,12 @@ export async function runDropperStage(
     );
     const seen = new Set<string>();
     const mergedProposals: string[] = [];
+    const mergedProofs: DropEvidence = {};
     // Output-adaptive queue (see the reflector pass): bisect turn/output-cut
     // batches and process both halves; the deterministic ranker + global cap
     // still apply once over the merged union. Total executed batches stay
     // bounded by WORKER_SHRINK_MAX_BATCHES.
     const queue = [...planned];
-    const isSessionBest = best.resolved.source !== "candidate";
     let batchRuns = 0;
     // Shared void tail for failures splitting cannot save: a partial
     // evaluation is never published, so the run is abandoned with the cursor
@@ -2909,10 +2941,11 @@ export async function runDropperStage(
               observations: batch,
               existingObservationsSummary: input.existingObservationsSummary || undefined,
               budgetTokens: runtime.config.observationsPoolMaxTokens,
+            targetTokens: runtime.config.observationsPoolTargetTokens,
               skipFullness: runtime.config.dropperPoolFullnessThreshold,
               pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
               rawProposals: true,
-              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel),
+              maxOutputTokens: workerOutputAllowance(best.ctx, bestModel, runtime.config.workerOutputMaxTokens),
               maxTurns: runtime.config.agentMaxTurns,
               thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForBatch),
               providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,
@@ -2924,6 +2957,7 @@ export async function runDropperStage(
         );
         if (!runtime.isGenerationActive(generation)) return "abort";
         for (const id of proposed ?? []) {
+          if (proposed?.proofs?.[id]) mergedProofs[id] = proposed.proofs[id];
           if (!seen.has(id)) {
             seen.add(id);
             mergedProposals.push(id);
@@ -2941,7 +2975,6 @@ export async function runDropperStage(
         // even the smallest batch cannot emit, and a session model that must
         // not spin all void the run with the cursor unmoved.
         if (
-          !isSessionBest &&
           error instanceof WorkerStreamError &&
           (error.lengthCut || error.turnCapExhausted) &&
           batch.length > 1
@@ -2962,8 +2995,9 @@ export async function runDropperStage(
       input.newObservations,
       globalMaxDrops,
       input.reflectionsForDropper,
+      Math.max(0, poolTokens - dropTargetTokens(runtime.config.observationsPoolMaxTokens, runtime.config.observationsPoolTargetTokens)),
     );
-    return commitDropperResult(selected.length > 0 ? selected : undefined);
+    return commitDropperResult(selected.length > 0 ? attachDropEvidence(selected, mergedProofs) : undefined);
   };
 
   // Largest-window model resolved so far (shrink target) and whether any
@@ -2976,6 +3010,8 @@ export async function runDropperStage(
   // cheap resolution-only iterations with their own continuation budget, so
   // a long chain of too-small models cannot starve the shrink pass.
   let attempt = 0;
+  let firstAttemptError: unknown;
+  let lastAttemptModel = "unresolved";
   let sizeSkips = 0;
   while (attempt < MAX_STAGE_ATTEMPTS) {
     const resolved = await resolveModel("dropper");
@@ -3012,7 +3048,7 @@ export async function runDropperStage(
       input.summaryTokens +
       dropperStaticTokens +
       WORKER_TURN_HEADROOM_TOKENS;
-    const dropperInputBudget = workerInputBudget(effectiveDropCtx, resolved.model as any);
+    const dropperInputBudget = workerInputBudget(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
     if (dropperEstimatedInput > dropperInputBudget) {
       debugLog("dropper.context_window_exceeded", {
         estimatedInput: dropperEstimatedInput,
@@ -3046,6 +3082,7 @@ export async function runDropperStage(
 
     try {
       attempt += 1;
+      lastAttemptModel = `${resolved.model.provider}/${resolved.model.id}`;
       const { runDropper } = await import("./agents/dropper/agent.js");
       const droppedIds = await runWorkerAttempt(
         "dropper",
@@ -3061,11 +3098,12 @@ export async function runDropperStage(
               sessionId,
             ),
             env: resolved.env,
-            maxOutputTokens: workerOutputAllowance(effectiveDropCtx, resolved.model as any),
+            maxOutputTokens: workerOutputAllowance(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens),
             reflections: input.reflectionsForDropper,
             observations: input.newObservations,
             existingObservationsSummary: input.existingObservationsSummary || undefined,
             budgetTokens: runtime.config.observationsPoolMaxTokens,
+              targetTokens: runtime.config.observationsPoolTargetTokens,
             skipFullness: runtime.config.dropperPoolFullnessThreshold,
             maxTurns: runtime.config.agentMaxTurns,
             thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
@@ -3080,9 +3118,17 @@ export async function runDropperStage(
       return commitDropperResult(droppedIds);
     } catch (error) {
       if (!runtime.isGenerationActive(generation)) return "abort";
+      firstAttemptError ??= error;
+      if (isWorkerSetupError(error)) {
+        runtime.recordConsolidationStageError(ctx, "dropper", error);
+        return "abort";
+      }
       if (isStaleExtensionContextError(error)) {
         debugLog("dropper.stale_ctx", { error: String(error) });
         return "abort";
+      }
+      if (error instanceof WorkerStreamError && (error.lengthCut || error.turnCapExhausted) && !stageModelForThinking && bestFit) {
+        return runShrunkBatches(bestFit);
       }
       // Output-length cut on an input the preflight accepted: the output
       // allowance — not the model — is at fault, so this is a size miss, not
@@ -3093,7 +3139,7 @@ export async function runDropperStage(
       if (error instanceof WorkerStreamError && error.lengthCut && !error.turnCapExhausted) {
         const candidateConfig = stageModelForThinking;
         if (candidateConfig) {
-          const outputAllowance = workerOutputAllowance(effectiveDropCtx, resolved.model as any);
+          const outputAllowance = workerOutputAllowance(effectiveDropCtx, resolved.model as any, runtime.config.workerOutputMaxTokens);
           debugLog("dropper.output_allowance_exceeded", {
             outputAllowance,
             model: `${(resolved.model as any).provider}/${(resolved.model as any).id}`,
@@ -3136,7 +3182,7 @@ export async function runDropperStage(
       // differ — they cool down and the fallback chain takes over.
       if (
         !candidateConfig &&
-        (error instanceof WorkerAttemptTimeoutError ||
+        (attempt >= 2 || error instanceof WorkerAttemptTimeoutError ||
           (error instanceof WorkerStreamError && (error.turnCapExhausted || error.lengthCut)))
       )
         break;
@@ -3147,7 +3193,7 @@ export async function runDropperStage(
   runtime.recordConsolidationStageError(
     ctx,
     "dropper",
-    new Error("Dropper: all model candidates exhausted"),
+    workerFailure("Dropper", attempt, lastAttemptModel, firstAttemptError),
   );
   return "abort";
 }

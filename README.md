@@ -88,6 +88,10 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 
 - **`recall`** — unified recall over session lineage, file content, and touched-file summaries, with paging and scope control.
 - **`project_memory`** — maintain a project-local task note and decision log with evidence and freshness tracking.
+- **`memory_policy`** — pin, unpin, invalidate, or supersede session observations/reflections while retaining source evidence.
+
+See [Memory reliability and local-model tuning](docs/MEMORY_RELIABILITY.md) for
+worker completion rules, pruning safeguards, retention controls, and limits.
 
 ## Durable task and decision notes
 
@@ -119,10 +123,13 @@ files for review and handoff, but the extension never commits them or edits
 or declaring evidence valid again.
 
 The tool supports `read`, `set_task`, `record_decision`, `verify`, `invalidate`,
-and `supersede`. Read first; each mutation requires `expectedRevision` to avoid
+`supersede`, `pin`, and `unpin`. Read first; each mutation requires `expectedRevision` to avoid
 overwriting another session's updates. `set_task` replaces the current task;
 include its complete progress and next-step lists. Decision IDs are returned by
-the tool; superseding retains the original in the full log.
+the tool; superseding retains the original in the full log and transfers its pin.
+Reads return bounded previews: use `offset` and `limit` (default 5, maximum 10)
+to page decisions newest first, or `id` to inspect one record. Responses contain
+the revision and at most 16,000 characters; complete records remain on disk.
 
 Example tool arguments after an initial `read` reports revision 0:
 
@@ -158,11 +165,14 @@ as evidence too. Files outside the project, symlink evidence, and files over
 4 MiB are rejected. File contents are not copied into evidence—only paths and
 SHA-256 hashes. Read-only freshness checks do not rewrite state or advance any
 observer/reflector cursor. Markdown freshness labels reflect their last
-generation; the tool and context reminder recompute them when read.
+generation; tool reads recompute evidence for the requested records, and context
+requests check only the task and selected decisions. Historical records outside
+that working set are marked unverified in generated Markdown.
 
 On each main-session `context` event, after compaction projection, the extension
-adds one live reminder containing the task and up to eight recent active
-decisions. It is capped at **8,000 characters**, not provider-specific tokens;
+adds one live reminder containing the task and up to eight active decisions,
+ranked by pin, task relevance, and recency. Invalidated and superseded decisions
+leave the reminder. It is capped at **8,000 characters**, not provider-specific tokens;
 the full history remains on disk. The reminder is not appended to the session
 transcript, and is rebuilt after compaction and resume. It supplies reference
 data, not authorization to start an old task. In untrusted projects or with

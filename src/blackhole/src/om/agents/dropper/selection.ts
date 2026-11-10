@@ -5,6 +5,8 @@
  * Single source of truth: the agent imports these back for its own runs.
  */
 import type { Observation, Reflection } from "../../ledger/index.js";
+import type { ObservationsDroppedEntryData } from "../../ledger/types.js";
+import { observationRenderedTokens } from "../../ledger/render-summary.js";
 import {
   REFLECTION_COVERAGE_DROP_RANK,
   coverageTierForObservation,
@@ -19,6 +21,19 @@ export const DROP_MIN_RATIO = 0.1;
 export const DROP_MAX_RATIO = 0.5;
 
 export type DropUrgency = "low" | "medium" | "high";
+export type DropEvidence = NonNullable<ObservationsDroppedEntryData["proofs"]>;
+export type DropSelection = string[] & { proofs?: DropEvidence };
+
+export function attachDropEvidence(ids: string[], proofs: DropEvidence): DropSelection {
+  Object.defineProperty(ids, "proofs", { value: Object.fromEntries(ids.filter(id => proofs[id]).map(id => [id, proofs[id]])), enumerable: false });
+  return ids as DropSelection;
+}
+
+export function dropTargetTokens(budgetTokens: number, configured?: number): number {
+  if (!Number.isFinite(budgetTokens) || budgetTokens <= 0) return Number.POSITIVE_INFINITY;
+  return typeof configured === "number" && Number.isFinite(configured) && configured > 0 && configured < budgetTokens
+    ? configured : budgetTokens * 0.5;
+}
 
 const RELEVANCE_DROP_RANK: Record<Observation["relevance"], number> = {
   low: 0,
@@ -44,13 +59,16 @@ export function maxDropCountForPool(
   observationTokens: number,
   budgetTokens: number,
   skipFullness: number = DROP_SKIP_FULLNESS,
+  targetTokens: number = budgetTokens * 0.5,
 ): number {
+  targetTokens = dropTargetTokens(budgetTokens, targetTokens);
   const droppableCount = observations.filter(
-    (observation) => observation.relevance !== "critical",
+    (observation) => !observation.pinned && observation.relevance !== "critical",
   ).length;
   if (droppableCount === 0) return 0;
   const fullness = observationPoolFullness(observationTokens, budgetTokens);
   if (fullness < skipFullness) return 0;
+  if (observationTokens <= targetTokens) return 0;
 
   const cappedFullness = Math.min(DROP_MAX_FULLNESS, Math.max(skipFullness, fullness));
   const fullnessSpan = DROP_MAX_FULLNESS - skipFullness;
@@ -64,7 +82,8 @@ export function maxDropCountForPool(
   const dropRatio =
     DROP_MIN_RATIO +
     ((cappedFullness - skipFullness) / fullnessSpan) * (DROP_MAX_RATIO - DROP_MIN_RATIO);
-  return Math.max(1, Math.floor(droppableCount * dropRatio));
+  const average = observations.length ? observationTokens / observations.length : observationTokens;
+  return Math.min(Math.ceil((observationTokens - targetTokens) / Math.max(1, average)), Math.max(1, Math.floor(droppableCount * dropRatio)));
 }
 
 function timestampRank(timestamp: string): number {
@@ -77,6 +96,7 @@ export function selectDropCandidates(
   observations: readonly Observation[],
   maxDrops: number,
   reflections: readonly Reflection[] = [],
+  tokensToRemove: number = Number.POSITIVE_INFINITY,
 ): string[] {
   if (maxDrops <= 0 || ids.length === 0) return [];
 
@@ -92,7 +112,8 @@ export function selectDropCandidates(
     .map(([id, index]) => ({ id, index, observation: byId.get(id) }))
     .filter(
       (candidate): candidate is { id: string; index: number; observation: Observation } =>
-        candidate.observation !== undefined,
+        candidate.observation !== undefined && !candidate.observation.pinned && candidate.observation.relevance !== "critical" &&
+        reflections.some(r => r.supportingObservationIds.includes(candidate.id)),
     )
     .sort((a, b) => {
       const coverageDelta =
@@ -106,5 +127,10 @@ export function selectDropCandidates(
       return coverageDelta || relevanceDelta || ageDelta || a.index - b.index;
     })
     .slice(0, maxDrops)
+    .filter((candidate) => {
+      if (tokensToRemove <= 0) return false;
+      tokensToRemove -= observationRenderedTokens(candidate.observation);
+      return true;
+    })
     .map((candidate) => candidate.id);
 }
