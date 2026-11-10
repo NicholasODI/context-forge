@@ -21,6 +21,7 @@ import { registerEvidencePreservingReducer } from "./extensions/evidence-preserv
 import { registerOnlineContextCompact } from "./extensions/online-context-compact/index.ts";
 import { Runtime } from "./blackhole/src/om/runtime.ts";
 import { registerBlackholeCommands, registerBlackholeMechanisms } from "./blackhole-register.ts";
+import { registerForgeSettings } from "./settings.ts";
 import { registerProjectMemory } from "./project-memory/index.ts";
 
 export type ContextForgeConfigLoader = (ctx: ExtensionContext) => ContextForgeConfig;
@@ -36,6 +37,7 @@ export function createContextForgeExtension(
 		// waiting for session_start, so commands work after omp restart.
 		const omRuntime = new Runtime();
 		registerBlackholeCommands(pi, omRuntime);
+		registerForgeSettings(pi);
 		const projectMemory = registerProjectMemory(pi, ctx => loadConfig(ctx).projectMemory);
 
 		pi.on("session_start", async (_event, ctx) => {

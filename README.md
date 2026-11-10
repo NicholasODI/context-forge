@@ -54,6 +54,21 @@ Resolution order (later wins):
 2. Global: `~/.omp/agent/context-forge.json`
 3. Project: `<cwd>/.omp/context-forge.json` (only when the project is trusted)
 
+### Interactive settings
+
+Run `/context-forge` for a terminal settings menu using arrows and Enter.
+Choose global defaults or trusted-project settings, toggle unified features,
+edit reducer model/provider, and adjust the cache write/read ratio.
+Changes are staged until **Save and close**. Escape or Cancel discards them;
+Reset changes only the draft until saved.
+
+**Restart OMP after saving** to apply all changes. The menu edits saved settings,
+not currently registered mechanisms. Project files take precedence over global
+files; omitted fields use built-in defaults, matching the existing loader.
+Saving writes a complete configuration, so project settings can mask later
+global changes. Invalid files and files changed while the menu is open are not
+overwritten. Advanced tuning remains under `/blackhole settings`.
+
 Example:
 
 ```json
