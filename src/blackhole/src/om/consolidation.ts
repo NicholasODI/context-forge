@@ -32,6 +32,7 @@ import { maxDropCountForPool, selectDropCandidates, dropTargetTokens, attachDrop
 import {
   coverageTierForObservation,
   observationToDropperLine,
+  reflectionToDropperLine,
   reflectionCoverageMap,
 } from "./agents/dropper/coverage.js";
 import {
@@ -326,18 +327,17 @@ function dropperPressureReached(config: Runtime["config"], poolTokens: number): 
   );
 }
 
-/**
- * Identity of the live pool: its observation ids, sorted so the key does not
- * depend on branch order or on where an observation came from. Ids are assigned
- * once at write time and never rewritten, so the id set changing is the only
- * way the pool's contents can change — which is exactly what the pressure
- * retry guard needs to notice.
- */
-function activePoolSignature(entries: Entry[], pending?: PendingOMState): string {
-  const observationIds = livePoolObservations(entries, pending)
-    .map((observation) => observation.id)
-    .sort();
-  return JSON.stringify(observationIds);
+/** Bind an empty verdict to the actual proof/policy inputs, not just obs ids. */
+function activePoolSignature(entries: Entry[], pending: PendingOMState | undefined, config: Config): string {
+  const observations = livePoolObservations(entries, pending);
+  const ids = new Set(observations.map(o => o.id));
+  return createHash("sha256").update(JSON.stringify({
+    observations: observations.map(o => [o.id, o.relevance, o.pinned ?? false]).sort(),
+    reflections: livePoolReflections(entries, pending).filter(r => r.supportingObservationIds.some(id => ids.has(id)))
+      .map(r => [r.id, r.content, [...r.supportingObservationIds].sort()]).sort(),
+    budgets: [config.observationsPoolMaxTokens, config.observationsPoolTargetTokens, config.reflectionsPoolMaxTokens],
+    policyVersion: 2,
+  })).digest("hex");
 }
 
 /**
@@ -345,7 +345,7 @@ function activePoolSignature(entries: Entry[], pending?: PendingOMState): string
  * empty: `runDropperStage` binds the signature to the `"empty"` dropper cursor
  * precisely so repeated due-checks cannot re-issue the same model call against
  * a pool the dropper just declined to touch. Any pool change — a new
- * observation, or a drop from a cadence run — yields a different signature and
+ * observation, replacement citation, pin policy, or budget — changes the signature and
  * re-arms pressure.
  */
 function matchesEmptyPressurePool(runtime: Runtime, poolSignature: string): boolean {
@@ -492,7 +492,7 @@ export function anyStageDue(entries: Entry[], runtime: Runtime, pending?: Pendin
           // already evaluated and left untouched.
           if (
             dropperPressureReached(config, poolTokens) &&
-            !matchesEmptyPressurePool(runtime, activePoolSignature(entries, pending))
+            !matchesEmptyPressurePool(runtime, activePoolSignature(entries, pending, config))
           )
             return true;
 
@@ -2576,7 +2576,7 @@ function computeDropperInput(
     (s: number, o: any) =>
       s +
       estimateStringTokens(
-        observationToDropperLine(o, coverageTierForObservation(o, coverageById)),
+        observationToDropperLine(o, coverageTierForObservation(o, coverageById), reflectionsForDropper),
       ),
     0,
   );
@@ -2647,7 +2647,7 @@ export async function runDropperStage(
   // the dropper actually sees all describe the same pool. Manual mode reads the
   // pending file once here and shares it with the gate below.
   const pressurePending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
-  const pressurePoolSignature = activePoolSignature(entries, pressurePending);
+  const pressurePoolSignature = activePoolSignature(entries, pressurePending, runtime.config);
   const pressureReached = dropperPressureReached(
     runtime.config,
     observationPoolTokens(entries, pressurePending).tokens,
@@ -2731,7 +2731,7 @@ export async function runDropperStage(
   // reflector's newItemsTokens, which prices both. All terms price the
   // dispatched rendering with the same CJK-aware estimator as the static side.
   const dropperReflectionsTokens = input.reflectionsForDropper.reduce(
-    (s: number, r: any) => s + estimateStringTokens(reflectionToSummaryLine(r)),
+    (s: number, r: any) => s + estimateStringTokens(reflectionToDropperLine(r)),
     0,
   );
 
@@ -2831,7 +2831,7 @@ export async function runDropperStage(
     );
     const batchItemTokens = (o: any) =>
       estimateStringTokens(
-        observationToDropperLine(o, coverageTierForObservation(o, batchCoverageById)),
+        observationToDropperLine(o, coverageTierForObservation(o, batchCoverageById), input.reflectionsForDropper),
       );
     const batches = planPrefixBatches(input.newObservations, batchItemTokens, itemBudget);
     if (input.newObservations.length > 0) {

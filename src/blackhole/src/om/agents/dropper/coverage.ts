@@ -124,8 +124,20 @@ export function summarizeCoverageTransitionsByRelevance(
 export function observationToDropperLine(
   observation: Observation,
   coverage: ReflectionCoverageTier,
+  reflections: readonly Reflection[] = [],
 ): string {
-  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] [coverage: ${coverage}] ${observation.content}`;
+  const ids = eligibleReplacementIds(observation.id, reflections);
+  const eligible = !observation.pinned && observation.relevance !== "critical" && ids.length > 0;
+  return `[${observation.id}] [OBSERVATION; ${eligible ? "candidate" : "KEEP"}] ${observation.timestamp} [${observation.relevance}]${observation.pinned ? " [pinned]" : ""} [coverage: ${coverage}] [allowed replacement refs: ${ids.join(", ") || "none"}] ${observation.content}`;
+}
+
+/** Show exactly which provided reflections meet the structural citation rule. */
+export function eligibleReplacementIds(id: string, reflections: readonly Reflection[]): string[] {
+  return [...new Set(reflections.filter(r => r.supportingObservationIds.includes(id)).map(r => r.id))].slice(0, 8);
+}
+
+export function reflectionToDropperLine(reflection: Reflection): string {
+  return `[${reflection.id}] [REFLECTION; replacement only, never a drop id] ${reflection.content}`;
 }
 
 export function coverageTierForObservation(
