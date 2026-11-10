@@ -25,8 +25,33 @@ by the main agent; their filesystem/ledger operations make no provider calls.
   checks do not claim reviewed coverage.
 
 Observer inputs omit assistant thinking to reduce repeated worker input. Raw
-session evidence remains available through recall. The reflector and dropper
-keep their existing normal-stop completion protocol.
+session evidence remains available through recall. The reflector keeps its
+existing completion behavior. The dropper supports
+`complete: true` on a validated final `drop_observations` call, terminating
+immediately without another provider confirmation turn. A final empty batch
+(`ids: []`, `replacements: {}`, a reason, and `complete: true`) means keep all
+candidates. Invalid IDs, missing replacement coverage, pinned/critical proposals,
+or a provider error/output cut cannot authorize that close. Legacy normal text
+stops remain supported; a bare terminal `toolUse` without a validated close is
+still incomplete. Successful dropper stage completion clears its previous error
+from status.
+
+Dropper prompts separate candidate observation IDs from replacement reflection
+IDs and show up to eight structurally eligible replacement references on each
+candidate line. Candidates with no provided citation coverage, or pinned/critical
+status, are marked KEEP. The same rendering is priced in input-fit checks.
+Replacement links establish citation eligibility, not semantic equivalence.
+
+Rejected proposals return bounded per-ID explanations and eligible references,
+including wrong ID namespace, missing/mistyped replacement keys, and unsupported
+citations. Two consecutive tool executions that neither add valid candidates nor
+finish explicitly fail the invocation without advancing coverage. This bounds
+repeated rejected proposals; host schema-validation failures still use the normal
+turn/deadline guards. The completion field accepts JSON booleans and the four
+explicit compatibility strings `true`, `false`, `True`, `False`; false strings
+are never interpreted by JavaScript truthiness. Prompts request canonical JSON
+booleans. Empty pressure results are invalidated by new replacement evidence,
+pin policies, or relevant budget changes as well as observation-pool changes.
 
 ## Protect or correct session memory
 
@@ -68,11 +93,14 @@ reminder before and after compaction and are shared by sessions in that project.
 
 When project memory is enabled and trusted, each Blackhole compaction prepends
 one bounded Resume Context block from the current saved task. It includes task
-status, evidence freshness, goal, up to two blockers, the next two actions, and
+status, evidence freshness, goal, up to two blockers, one next action, and
 recent progress. It makes no model call, does not infer a task from missing data,
 and creates no project files. `project_memory set_task` accepts a `blockers` list;
 older notes without that field remain readable. Supply the complete lists when
 replacing the task.
+
+The focused continuation lifecycle, attribution, scoped evidence and bounded
+handoff diagnostics are documented in [CONTINUATION_STATE.md](CONTINUATION_STATE.md).
 
 The prefix is kept below 3,200 characters by clipping individual fields; complete
 notes remain accessible through `project_memory`. Previous prefixes are stripped
@@ -81,7 +109,7 @@ prefix in the mutable `leadingSummary` field, ahead of immutable segments; the
 complete fallback summary carries it too. Stale/unverified evidence, completed
 tasks, and notes shared from another session do not authorize resuming old work.
 
-Use `/blackhole-memory diagnostics [offset:N] [limit:1–25]` to inspect the latest
+Use `/blackhole-memory diagnostics [id:MEMORY_ID] [offset:N] [limit:1–25]` to inspect the latest
 snapshot. The report shows summary selection, estimated rendered costs,
 importance, pin state, current active state, and these exclusion reasons:
 
@@ -102,6 +130,21 @@ Stage cursors now retain completion timestamps for recorded/empty results and
 the report captures them with coverage anchors at each new compaction. A no-op
 stage check can complete without a model call; these are not claim-verification
 timestamps. Legacy cursors have unknown completion times.
+
+Observations and reflections can share a content hash when their text is
+identical. Folding and diagnostics keep their shapes, importance, inclusion,
+active state, and context evidence separate by record kind. Stored IDs are not
+rewritten. Existing `memory_policy` events are ID-scoped: if both kinds match an
+ID, explicit pin/unpin/invalidate/supersede actions affect both; derived
+reflection invalidation does not remove an independent observation of that hash.
+
+Diagnostics show the first persisted drop marker, its write timestamp when
+available, and recorded replacement proof. Critical observations with drop
+markers are counted for inspection. These markers can predate current guards;
+the report does not automatically restore or rewrite historical drops. Use an
+ID filter to inspect all record kinds with that hash without paging the whole
+history. After a folding fix, an old snapshot may no longer reconstruct exactly;
+unknown exclusion reasons remain unknown rather than being fabricated.
 
 When a matching session/compaction has passed through the context projection
 hook, diagnostics also show which exact memory lines and continuity prefix were
@@ -125,6 +168,39 @@ pruning: below the effective target, no pruning call is needed; selection stops
 once enough safe proposed records meet the target. Safety vetoes, count caps,
 or missing replacement coverage can leave the pool above target. Full evidence
 remains archived regardless of summary selection.
+
+The main-model `reflectionsPoolMaxTokens` budget does **not** cap dropper proof
+availability. The worker considers active-ledger reflections that cite eligible
+observations, including references omitted from the latest main summary. Only
+unprotected observations with citation coverage go to the model as candidates;
+optional read-only context is separately bounded. Structural eligibility alone
+does not establish safe equivalence or require a drop.
+
+A replacement reference remains stored and recallable; pruning does not pin it
+or force it into the budget-limited main summary. Source retention and live
+context inclusion remain separate. Explicitly pin facts that must stay in the
+working context, and keep that protected core within its output budgets.
+
+`dropperInputMaxTokens` and the resolved worker context bound the joint input:
+candidate text, every relevant provided proof, static instructions/tool schema,
+read-only context, and turn headroom. Larger candidate sets use bounded batches
+with only their relevant reflections. Shared proof is charged once per batch;
+a single oversized proof bundle defers the run without advancing coverage.
+Selections/proofs merge globally and commit once after all batches succeed. A
+later failed batch cannot publish earlier partial drops. This can use several
+existing dropper requests while catching up; it adds no new worker type.
+
+`/blackhole-memory` reports a **Drop eligibility** line with citation-eligible,
+protected, and uncovered record/token counts across the active ledger. Large
+protected/uncovered totals can prevent reaching the pruning target even when
+the worker works correctly. Debug event `dropper.eligibility` gives the actual
+run scope and evidence counts. `dropper.committed` records the final selection
+and rendered token reduction; per-batch `dropper.result` can report raw proposals
+with zero selected until that global commit. New `selectedDropTokens` values use
+rendered costs; `selectedDropContentTokens` preserves the content-only figure
+used by older result logs. Old empty verdicts are rechecked after this policy
+upgrade, new evidence, or changes to relevant pool/worker budgets or configured
+worker models. These controls do not force removals to meet a quota.
 
 ## Local worker settings
 

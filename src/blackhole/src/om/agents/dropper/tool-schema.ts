@@ -17,9 +17,13 @@ export const DropObservationsSchema = {
   properties: {
     ids: {
       type: "array",
-      minItems: 1,
+      minItems: 0,
       maxItems: 128,
       items: { type: "string", minLength: 1 },
+    },
+    complete: {
+      anyOf: [{ type: "boolean" }, { type: "string", enum: ["true", "false", "True", "False"] }],
+      description: "Use JSON boolean true (not a quoted string) only after evaluating the entire candidate list. A valid final batch ends the worker; ids may be empty. Listed string spellings are accepted for local-host compatibility.",
     },
     // Required for an auditable removal; omitted reasons cannot authorize drops.
     reason: { type: "string", minLength: 1, maxLength: 1000 },
@@ -34,6 +38,7 @@ export const DropObservationsSchema = {
 
 export interface DropObservationsArgs {
   ids: string[];
+  complete?: boolean | "true" | "false" | "True" | "False";
   reason: string;
   replacements: Record<string, string[]>;
 }

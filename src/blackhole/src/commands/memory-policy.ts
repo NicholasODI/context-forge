@@ -1,9 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { foldLedger } from "../om/ledger/fold.js";
-import { OM_MEMORY_POLICY, applyMemoryPolicies, type MemoryPolicy } from "../om/ledger/policy.js";
-import { livePoolObservations } from "../om/ledger/progress.js";
+import { OM_MEMORY_POLICY, type MemoryPolicy } from "../om/ledger/policy.js";
+import { livePoolObservations, livePoolReflections } from "../om/ledger/progress.js";
 import { readPendingState } from "../om/pending.js";
-import { isReflection, type Entry } from "../om/ledger/types.js";
+import { type Entry } from "../om/ledger/types.js";
 
 export function registerMemoryPolicyTool(pi: ExtensionAPI): void {
   pi.registerTool({
@@ -25,14 +24,8 @@ export function registerMemoryPolicyTool(pi: ExtensionAPI): void {
       const policy = raw as unknown as MemoryPolicy;
       if (!["pin", "unpin", "invalidate", "supersede"].includes(policy.action) || !/^[a-f0-9]{12}$/.test(policy.id) || typeof policy.reason !== "string" || !policy.reason.trim() || policy.reason.length > 1000) throw new Error("Invalid memory policy.");
       const entries = ctx.sessionManager.getBranch() as Entry[];
-      const ledger = foldLedger(entries);
       const pending = readPendingState(ctx.sessionManager.getSessionId());
-      const refs = [...ledger.reflections, ...(pending.reflectionBatches ?? []).flatMap(b => {
-        const data = b.data as { reflections?: unknown } | undefined;
-        return Array.isArray(data?.reflections) ? data.reflections.filter(isReflection) : [];
-      })];
-      const state = applyMemoryPolicies(entries, livePoolObservations(entries, pending), refs);
-      const active = [...state.observations, ...state.reflections];
+      const active = [...livePoolObservations(entries, pending), ...livePoolReflections(entries, pending)];
       if (!active.some(r => r.id === policy.id)) throw new Error("Memory ID is missing or inactive; use recall to inspect its history.");
       if (policy.action === "supersede" && (policy.id === policy.replacementId || !active.some(r => r.id === policy.replacementId))) throw new Error("Supersession requires a different active replacement ID.");
       pi.appendEntry(OM_MEMORY_POLICY, policy);

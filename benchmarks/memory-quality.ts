@@ -1,14 +1,14 @@
 /** Offline synthetic fixture: no workers, provider calls, or user-state access. */
 import { buildSessionContext, convertToLlm } from "@earendil-works/pi-coding-agent";
 import { compile } from "../src/blackhole/src/core/summarize.js";
-import { CONTINUITY_START, withContinuity } from "../src/blackhole/src/core/continuity.js";
+import { CONTINUITY_START, withContinuity, stripContinuity } from "../src/blackhole/src/core/continuity.js";
 import { buildCompactionProjection } from "../src/blackhole/src/om/ledger/projection.js";
 import { foldLedger } from "../src/blackhole/src/om/ledger/fold.js";
 import { recallMemorySources } from "../src/blackhole/src/om/ledger/recall.js";
 import { renderSummary, observationRenderedTokens, reflectionToSummaryLine } from "../src/blackhole/src/om/ledger/render-summary.js";
 import { maxDropCountForPool, selectDropCandidates } from "../src/blackhole/src/om/agents/dropper/selection.js";
 import { estimateStringTokens } from "../src/blackhole/src/om/tokens.js";
-import type { Entry, Observation, Reflection } from "../src/blackhole/src/om/ledger/types.js";
+import { isObservation, isReflection, type Entry, type Observation, type Reflection } from "../src/blackhole/src/om/ledger/types.js";
 import { renderContinuity } from "../src/project-memory/continuity.js";
 import { emptyMemory, renderReminder } from "../src/project-memory/store.js";
 
@@ -37,7 +37,11 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   };
   const setPolicy = (action: string, id: string, replacementId?: string) => append({ type: "custom", customType: "om.memory.policy", data: { action, id, replacementId, reason: "Synthetic user constraint/correction" } });
   addObservation(1, "Deployment port: 43179."); setPolicy("pin", memoryId(1));
-  addObservation(2, "Checksum invariant: OAK-731.", "critical"); setPolicy("pin", memoryId(2));
+  const checksum = addObservation(2, "Checksum invariant: OAK-731.", "critical"); setPolicy("pin", memoryId(2));
+  // Real workers hash content in both namespaces: an exact copy can share an ID.
+  append({ type: "custom", customType: "om.reflections.recorded", data: { coversUpToId: checksum.sourceEntryIds[0], reflections: [
+    { id: checksum.id, content: checksum.content, supportingObservationIds: [checksum.id], tokenCount: checksum.tokenCount },
+  ] } });
   addObservation(3, "Transport: TCP-OLD."); setPolicy("pin", memoryId(3));
   addObservation(5, "Historical retry budget: 17.", "low");
   const state = { ...emptyMemory(), revision: 1, task: {
@@ -48,6 +52,7 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   const config = { observationsPoolMaxTokens: profile.observations, reflectionsPoolMaxTokens: profile.reflections, fullFoldAlways: true, taskQuery: state.task.text };
   let previousSummary = "", pinnedChecks = 0, pinnedHits = 0, correctedChecks = 0, correctedHits = 0, staleLeaks = 0;
   let budgetViolations = 0, prefixViolations = 0, staleActionLeaks = 0, maxSummaryTokens = 0, pruned = 0;
+  let recordShapeViolations = 0, criticalTagViolations = 0;
   let finalSelected: string[] = [], finalSummary = "";
   for (let cycle = 1; cycle <= cycles; cycle++) {
     clock = cycle;
@@ -81,6 +86,8 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
       }
     }
     const projection = buildCompactionProjection(entries, "", config);
+    recordShapeViolations += projection.observations.filter(o => !isObservation(o)).length + projection.reflections.filter(r => !isReflection(r)).length;
+    if (projection.observations.find(o => o.id === checksum.id)?.relevance !== "critical") criticalTagViolations++;
     const ids = new Set(projection.observations.map(o => o.id));
     for (const id of [memoryId(1), memoryId(2)]) { pinnedChecks++; if (ids.has(id)) pinnedHits++; }
     if (cycle >= 75) {
@@ -103,7 +110,9 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   }
   const archive = [1, 2, 3, 4, 5].filter(n => n !== 4 || cycles >= 75).map(n => recallMemorySources(entries, memoryId(n)));
   const context = buildSessionContext(entries as any);
-  const wire = convertToLlm(context.messages);
+  // Mirror the live hook: its one fresh handoff replaces the persisted copy.
+  const wire = convertToLlm(context.messages.map(m => (m as any).role === "compactionSummary"
+    ? { ...m, summary: stripContinuity((m as any).summary) } : m));
   const reminder = renderReminder(state, freshness);
   const visible = JSON.stringify(wire) + reminder;
   const questions: Omit<Probe, "exposed">[] = [
@@ -116,8 +125,8 @@ export function runMemoryProfile(profile: typeof PROFILES[number], cycles = 300)
   ];
   const probes: Probe[] = questions.map(q => ({ ...q, exposed: q.id === "retry" ? finalSelected.includes(memoryId(5)) : visible.includes(q.expected) }));
   return {
-    profile: profile.name, cycles, declaredWindow: profile.window,
-    metrics: { pinnedHits, pinnedChecks, correctedHits, correctedChecks, staleLeaks, budgetViolations, prefixViolations, staleActionLeaks,
+    profile: profile.name, fixtureVersion: 3, cycles, declaredWindow: profile.window,
+    metrics: { pinnedHits, pinnedChecks, correctedHits, correctedChecks, staleLeaks, budgetViolations, prefixViolations, staleActionLeaks, recordShapeViolations, criticalTagViolations,
       archiveRecovered: archive.filter(r => r.status === "found" && !r.partial && r.sourceEntries.length).length, archiveChecks: archive.length,
       pruned, maxSummaryTokens, estimatedSummaryFitsWindow: maxSummaryTokens < profile.window,
       finalSelectedRecords: finalSelected.length, hostCompactionMessages: context.messages.filter(m => (m as any).role === "compactionSummary").length,

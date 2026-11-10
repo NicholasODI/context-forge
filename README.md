@@ -96,7 +96,7 @@ The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackh
 |---|---|
 | `/blackhole` | Manual compact with structural summary. Subcommands: `[settings]` config overlay, `[changelog]`, `[cleanup]`, `[om-off]`/`[om-on]`. |
 | `/blackhole-memory` | Memory pipeline status & token counters. `[view]` visible observations/reflections, `[full]` complete recorded memory (copies to clipboard). |
-| `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Page with `offset:N limit:1–25`. |
+| `/blackhole-memory diagnostics` | Latest summary selection/exclusion reasons, token estimates, worker completion/coverage, and context-hook evidence. Filter with `id:MEMORY_ID`; page with `offset:N limit:1–25`. Includes drop-marker provenance. |
 | `/blackhole-export` | Export distilled project memory to markdown. `[out:<path>]` — defaults to project cwd. |
 | `/blackhole-recall` | Search session history. `<query> [page:N] [scope:all] [mode:file\|touched]`. |
 
@@ -112,8 +112,8 @@ worker completion rules, pruning safeguards, retention controls, and limits.
 ## Durable task and decision notes
 
 The `projectMemory` feature (default `true`) complements observational memory with
-explicit project state. It does **not** change worker thresholds, the memory
-ledger, or compaction. No files are created until the agent calls the
+explicit project state and focused compaction handoffs. It does **not** change
+worker thresholds or the observational-memory ledger. No files are created until the agent calls the
 `project_memory` tool to write a record in a trusted project.
 
 To start, ask: **“Record our current goal, completed progress, blockers, and next steps in
@@ -138,8 +138,10 @@ files for review and handoff, but the extension never commits them or edits
 `/forge-memory refresh` regenerates the Markdown views without rerunning checks
 or declaring evidence valid again.
 
-The tool supports `read`, `set_task`, `record_decision`, `verify`, `invalidate`,
-`supersede`, `pin`, and `unpin`. Read first; each mutation requires `expectedRevision` to avoid
+The tool supports `read`, `diagnostics`, `set_task`, `update_task`, `complete_task`,
+`record_decision`, `verify`, `invalidate`,
+`supersede`, `pin`, and `unpin`. `supersede id=task` explicitly replaces a task;
+`read section=tasks` retrieves previous snapshots. Read first; each mutation requires `expectedRevision` to avoid
 overwriting another session's updates. `set_task` replaces the current task;
 include its complete progress, blocker, and next-step lists. Decision IDs are returned by
 the tool; superseding retains the original in the full log and transfers its pin.
@@ -167,8 +169,10 @@ File evidence is hashed from actual project files. Checks record the agent's
 reported command and result; the tool does **not** execute or independently
 validate tests. Only record checks that were actually run.
 
-- **Current** means recorded file fingerprints and the available Git
-  HEAD/tracked-diff snapshot have not changed. It does not prove a claim true.
+- **Current** means the selected evidence snapshot is unchanged. New file-based
+  notes track only their listed file hashes; repository-scoped and legacy
+  evidence also compare the available Git snapshot. Unknown dependencies remain
+  unknown. This does not prove a claim true or expected tests ran.
 - **Stale** means evidence changed/disappeared, repository state changed, or the
   record was explicitly invalidated. Reinspect/retest before `verify` captures
   a new evidence snapshot.
@@ -204,6 +208,11 @@ This works in both normal and append-summary modes.
 
 Run `npm run benchmark:memory` for three isolated 300-compaction retention
 profiles and optional model-recall probes. See [the benchmark guide](benchmarks/README.md).
+
+See [Focused continuation state](docs/CONTINUATION_STATE.md) for v2 migration,
+task lifecycle, provenance, host check receipts, handoff diagnostics, and the
+omni-advisor integration boundary. `/forge-memory diagnostics` shows budget and
+omission decisions without making model calls.
 
 Concurrent writers use a lock and revision checks. If a process crashes leaving
 `.context-forge/write.lock`, inspect whether another writer is active before

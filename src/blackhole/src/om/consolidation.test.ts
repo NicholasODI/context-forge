@@ -9,7 +9,7 @@ import { runDropper } from "./agents/dropper/agent";
 import { runObserver } from "./agents/observer/agent";
 import { anyStageDue, makeModelResolver, runObserverStage, runReflectorStage, runDropperStage } from "./consolidation";
 import { serializeConversation } from "./serialize";
-import { workerInputBudget, workerOutputAllowance } from "./prompt-budget";
+import { workerInputBudget, workerOutputAllowance, workerStaticPromptTokens, WORKER_TURN_HEADROOM_TOKENS } from "./prompt-budget";
 
 const sandbox = vi.hoisted(() => ({ root: "" }));
 vi.mock("@earendil-works/pi-coding-agent", async original => ({
@@ -131,6 +131,7 @@ describe("observer completion and bounded retries", () => {
 
 it("persists validated replacement evidence when the dropper deactivates an observation", async () => {
   const s = stage(true);
+  s.runtime.lastDropperError = "An older incomplete attempt";
   s.runtime.config.observationsPoolMaxTokens = 50;
   s.runtime.config.observationsPoolTargetTokens = 25;
   const item = s.entries[1].data.observations[0];
@@ -140,13 +141,15 @@ it("persists validated replacement evidence when the dropper deactivates an obse
   ] } });
   let calls = 0;
   s.ctx.modelRegistry.streamSimple = () => response(calls++ === 0 ? {
-    ids: [item.id], reason: "The provided reflection preserves the complete fact", replacements: { [item.id]: ["000000000002"] },
+    complete: true, ids: [item.id], reason: "The provided reflection preserves the complete fact", replacements: { [item.id]: ["000000000002"] },
   } : undefined, undefined, "drop_observations");
   expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
   const [type, data] = s.pi.appendEntry.mock.calls[0];
   expect(type).toBe("om.observations.dropped");
   expect(data.proofs[item.id].reflectionIds).toEqual(["000000000002"]);
   expect(data.proofs[item.id].reason).toContain("preserves");
+  expect(calls).toBe(1);
+  expect(s.runtime.lastDropperError).toBeUndefined();
 });
 
 it("vetoes a drop whose claimed replacement does not cite the observation", async () => {
@@ -173,6 +176,8 @@ it("shows completed-empty review progress and the effective pruning target in st
   const text = s.ctx.ui.notify.mock.calls.at(-1)[0];
   expect(text).toContain("Reflector:      ~0 tokens");
   expect(text).toContain("eligible above target");
+  expect(text).toContain("Drop eligibility: 0 citation-eligible");
+  expect(text).toContain("1 uncovered");
   expect(s.stream).toHaveBeenCalledTimes(1); // status never launches another worker
 });
 
@@ -203,4 +208,118 @@ describe("successful empty reflection review watermark", () => {
     s.runtime.cursors.reflector!.entryId = "missing-after-fork";
     expect(anyStageDue(s.entries, s.runtime)).toBe(true);
   });
+});
+
+it("rearms an empty pressure review when a new replacement reflection becomes available", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observeAfterTokens: 1e9, reflectAfterTokens: 1e9, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Preserve source evidence. ".repeat(20);
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
+  expect(s.stream).not.toHaveBeenCalled(); // no replacement evidence, no model request
+  expect(anyStageDue(s.entries, s.runtime)).toBe(false);
+  s.entries.push({ type: "custom", id: "new-replacement", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: item.content, supportingObservationIds: [item.id], tokenCount: 100 },
+  ] } });
+  expect(anyStageDue(s.entries, s.runtime)).toBe(true); // observation ids did not change
+});
+
+it("aborts repeated rejected dropper proposals without recording drops or advancing coverage", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25, agentMaxTurns: 16 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Preserve source evidence. ".repeat(20);
+  s.entries.push({ type: "custom", id: "replacement", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: item.content, supportingObservationIds: [item.id], tokenCount: 100 },
+  ] } });
+  const stream = vi.fn(() => response({ ids: ["000000000002"], replacements: {}, reason: "Wrong ID namespace", complete: "True" }, undefined, "drop_observations"));
+  s.ctx.modelRegistry.streamSimple = stream;
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("abort");
+  expect(stream).toHaveBeenCalledTimes(2);
+  expect(s.pi.appendEntry).not.toHaveBeenCalled();
+  expect(s.runtime.getCursor("dropper")).toBeUndefined();
+  expect(s.runtime.lastDropperError).toContain("no progress in two consecutive tool calls");
+});
+
+it("uses ledger replacement evidence even when it exceeds the main summary reflection cap", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25, reflectionsPoolMaxTokens: 1 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Preserve source evidence. ".repeat(20);
+  s.entries.push({ type: "custom", id: "replacement", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: item.content, supportingObservationIds: [item.id], tokenCount: 100 },
+  ] } });
+  const stream = vi.fn((_model, context) => {
+    expect(JSON.stringify(context)).toContain("000000000002] [REFLECTION");
+    return response({ ids: [item.id], replacements: { [item.id]: ["000000000002"] }, reason: "Provided complete replacement", complete: true }, undefined, "drop_observations");
+  });
+  s.ctx.modelRegistry.streamSimple = stream;
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
+  expect(stream).toHaveBeenCalledTimes(1);
+  expect(s.pi.appendEntry).toHaveBeenCalledWith("om.observations.dropped", expect.objectContaining({ observationIds: [item.id] }));
+});
+
+function batchedDropperStage() {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25, reflectionsPoolMaxTokens: 1,
+    dropperInputMaxTokens: workerStaticPromptTokens("dropper") + WORKER_TURN_HEADROOM_TOKENS + 2400 };
+  const observations = Array.from({ length: 6 }, (_, n) => ({ ...s.entries[1].data.observations[0],
+    id: (100 + n).toString(16).padStart(12, "0"), content: `Candidate ${n}. ` + "x ".repeat(1200) }));
+  s.entries[1].data.observations = observations;
+  const reflections = observations.map((o, n) => ({ id: (200 + n).toString(16).padStart(12, "0"), content: o.content, supportingObservationIds: [o.id], tokenCount: 600 }));
+  s.entries.push({ type: "custom", id: "replacements", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections } });
+  const evaluate = (context: any) => {
+    const text = JSON.stringify(context);
+    const ids = [...text.matchAll(/\[([a-f0-9]{12})\] \[OBSERVATION; candidate\]/g)].map(m => m[1]);
+    const providedRefs = [...text.matchAll(/\[([a-f0-9]{12})\] \[REFLECTION; replacement only, never a drop id\]/g)].map(m => m[1]);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.length).toBeLessThan(observations.length);
+    expect(new Set(providedRefs)).toEqual(new Set(reflections.filter(r => r.supportingObservationIds.some(id => ids.includes(id))).map(r => r.id)));
+    return { ids, replacements: Object.fromEntries(ids.map(id => [id, reflections.filter(r => r.supportingObservationIds.includes(id)).map(r => r.id)])),
+      reason: "Each provided replacement preserves the candidate", complete: true };
+  };
+  return { ...s, evaluate, observations };
+}
+
+it("batches complete proof bundles under the worker cap and commits the global selection once", async () => {
+  const s = batchedDropperStage(), seen: string[] = [];
+  const stream = vi.fn((_model, context) => {
+    const proposal = s.evaluate(context); seen.push(...proposal.ids);
+    return response(proposal, undefined, "drop_observations");
+  });
+  s.ctx.modelRegistry.streamSimple = stream;
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("continue");
+  expect(stream.mock.calls.length).toBeGreaterThan(1);
+  expect(seen).toEqual(s.observations.map(o => o.id));
+  expect(s.pi.appendEntry).toHaveBeenCalledTimes(1);
+  const data = s.pi.appendEntry.mock.calls[0][1];
+  expect(data.observationIds).toHaveLength(3); // original per-run half-pool cap
+  expect(Object.keys(data.proofs)).toHaveLength(3);
+});
+
+it("does not commit a partial prune when a later evidence batch fails", async () => {
+  const s = batchedDropperStage();
+  const stream = vi.fn((_model, context) => stream.mock.calls.length === 1
+    ? response(s.evaluate(context), undefined, "drop_observations") : response(undefined, "HTTP 503 unavailable"));
+  s.ctx.modelRegistry.streamSimple = stream;
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("abort");
+  expect(stream).toHaveBeenCalledTimes(2);
+  expect(s.pi.appendEntry).not.toHaveBeenCalled();
+  expect(s.runtime.getCursor("dropper")).toBeUndefined();
+});
+
+it("defers an oversized candidate/proof bundle without trimming evidence or advancing coverage", async () => {
+  const s = stage(true);
+  s.runtime.config = { ...s.runtime.config, observationsPoolMaxTokens: 50, observationsPoolTargetTokens: 25,
+    dropperInputMaxTokens: workerStaticPromptTokens("dropper") + WORKER_TURN_HEADROOM_TOKENS + 400 };
+  const item = s.entries[1].data.observations[0];
+  item.content = "Source evidence. ".repeat(20);
+  s.entries.push({ type: "custom", id: "huge-proof", customType: "om.reflections.recorded", data: { coversUpToId: "e1", reflections: [
+    { id: "000000000002", content: "Very long proof text. ".repeat(2000), supportingObservationIds: [item.id], tokenCount: 10000 },
+  ] } });
+  expect(await runDropperStage(s.pi, s.runtime, s.ctx, s.generation, s.resolve, [], undefined)).toBe("abort");
+  expect(s.stream).not.toHaveBeenCalled();
+  expect(s.pi.appendEntry).not.toHaveBeenCalled();
+  expect(s.runtime.getCursor("dropper")).toBeUndefined();
+  expect(s.runtime.lastDropperError).toContain("replacement evidence cannot fit");
 });
