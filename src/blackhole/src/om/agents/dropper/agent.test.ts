@@ -82,6 +82,53 @@ describe("dropper explicit completion", () => {
     expect(await runDropper(args(stream))).toBeUndefined();
     expect(stream).toHaveBeenCalledTimes(1);
   });
+  it("preserves the first validated close when the host executes the observed invalid repeats afterward", async () => {
+    const lateResults: any[] = [];
+    const loop: any = (_prompts: unknown, context: any) => {
+      const iterator = (async function* () {
+        await context.tools[0].execute("first", proposal(true));
+        const invalid = { ...proposal(true), replacements: { [observation.id]: ["not-a-provided-reflection"] } };
+        lateResults.push(await context.tools[0].execute("repeat-1", invalid));
+        lateResults.push(await context.tools[0].execute("repeat-2", invalid));
+        lateResults.push(await context.tools[0].execute("repeat-3", proposal(true)));
+        yield { type: "agent_end", messages: [message(undefined, "toolUse")] };
+      })();
+      return Object.assign(iterator, { result: async () => [] });
+    };
+    const result = await runDropper({ ...args(vi.fn()), agentLoop: loop });
+    expect([...result!]).toEqual([observation.id]);
+    expect(result!.proofs![observation.id].reflectionIds).toEqual([reflection.id]);
+    expect(lateResults).toHaveLength(3);
+    expect(lateResults.every(r => r.terminate === true && r.details.ignored)).toBe(true);
+  });
+  it.each(["legacy", "modern"])("ends through the %s turn hook when the host ignores tool termination and has no cap", async flavor => {
+    let turns = 0;
+    const loop: any = (_prompts: unknown, context: any, config: any) => {
+      const iterator = (async function* () {
+        const result = await context.tools[0].execute("call", proposal(true)); turns++;
+        const ended = flavor === "legacy"
+          ? config.shouldStopAfterTurn({ message: message(proposal(true)), toolResults: [result] })
+          : config.finishTurn({ message: message(proposal(true)), toolResults: [result] })?.action === "end";
+        expect(ended).toBe(true);
+        yield { type: "agent_end", messages: [message(undefined, "toolUse")] };
+      })();
+      return Object.assign(iterator, { result: async () => [] });
+    };
+    expect([...(await runDropper({ ...args(vi.fn()), maxTurns: undefined, agentLoop: loop }))!]).toEqual([observation.id]);
+    expect(turns).toBe(1);
+  });
+  it("cannot turn a completed keep-all verdict into later drops on a host that keeps executing tools", async () => {
+    const loop: any = (_prompts: unknown, context: any) => {
+      const iterator = (async function* () {
+        await context.tools[0].execute("keep", { ids: [], replacements: {}, reason: "Keep all", complete: true });
+        const late = await context.tools[0].execute("late", proposal(true));
+        expect(late.details.ignored).toBe(true);
+        yield { type: "agent_end", messages: [message(undefined, "toolUse")] };
+      })();
+      return Object.assign(iterator, { result: async () => [] });
+    };
+    expect(await runDropper({ ...args(vi.fn()), agentLoop: loop })).toBeUndefined();
+  });
   it("allows partial proposals followed by an explicit empty close", async () => {
     let calls = 0;
     const stream = vi.fn(() => response(calls++ === 0 ? proposal(false) : { ids: [], replacements: {}, reason: "Evaluation finished", complete: true }));

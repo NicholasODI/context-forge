@@ -36,6 +36,13 @@ stops remain supported; a bare terminal `toolUse` without a validated close is
 still incomplete. Successful dropper stage completion clears its previous error
 from status.
 
+A validated dropper close is final. Both legacy and modern turn-end hooks stop
+the loop even when a native host ignores tool-result termination. If the host
+still executes queued calls, they are logged as `dropper.tool_call.ignored` and
+cannot add drops, replace accepted proofs, or invalidate the completed review.
+This also protects an explicit keep-all close. Provider errors, output cuts and
+aborts retain their existing failure checks.
+
 Dropper prompts separate candidate observation IDs from replacement reflection
 IDs and show up to eight structurally eligible replacement references on each
 candidate line. Candidates with no provided citation coverage, or pinned/critical
@@ -44,7 +51,7 @@ Replacement links establish citation eligibility, not semantic equivalence.
 
 Rejected proposals return bounded per-ID explanations and eligible references,
 including wrong ID namespace, missing/mistyped replacement keys, and unsupported
-citations. Two consecutive tool executions that neither add valid candidates nor
+citations. Before a validated close, two consecutive tool executions that neither add valid candidates nor
 finish explicitly fail the invocation without advancing coverage. This bounds
 repeated rejected proposals; host schema-validation failures still use the normal
 turn/deadline guards. The completion field accepts JSON booleans and the four
