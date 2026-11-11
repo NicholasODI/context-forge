@@ -271,3 +271,6 @@ src/
 ## License
 
 [MIT](./LICENSE)
+
+Implementation boundaries and configuration maintenance are described in
+[Maintenance boundaries](docs/MAINTENANCE_BOUNDARIES.md).

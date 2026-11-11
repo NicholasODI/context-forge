@@ -1,3 +1,4 @@
+import { numericField, NUMERIC_KEYS, validNumericValue, normalizePoolTarget } from "../core/numeric-fields.js";
 /**
  * Blackhole settings — modal-based configuration via ConfigManager.
  *
@@ -134,27 +135,8 @@ export const config = new ConfigManager<UnifiedConfig>({
       max: 500_000,
       step: 1_000,
     },
-    {
-      key: "retainedToolOutputMaxTokens",
-      type: "number",
-      label: "Retained tool outputs",
-      description:
-        "Token budget for historical tool-output text; newest is retained first and older text remains available via recall",
-      value: cfg.retainedToolOutputMaxTokens,
-      min: 0,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "recallResponseMaxChars",
-      type: "number",
-      label: "Recall response max characters",
-      description: "Bounds recall search/expansion responses; 0 disables the bound",
-      value: cfg.recallResponseMaxChars,
-      min: 0,
-      max: 2_000_000,
-      step: 1_000,
-    },
+    numericField("retainedToolOutputMaxTokens", cfg),
+    numericField("recallResponseMaxChars", cfg),
     // Context-window-derived knobs (issue #60) + preset curve (spec §4). Always
     // visible: 0 means "not set" (the loader treats 0 as unset, so the selected
     // preset curve governs). Type a value to engage the knob; set it back to 0
@@ -223,98 +205,15 @@ export const config = new ConfigManager<UnifiedConfig>({
         "off=skip stage when all OM models fail, instead of falling back to the main coding model",
       value: cfg.sessionFallback ?? true,
     },
-    {
-      key: "observeAfterTokens",
-      type: "number",
-      label: "Observer threshold",
-      description: "Tokens accumulated since last observer run before triggering next observe",
-      value: cfg.observeAfterTokens,
-      min: 1_000,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "reflectAfterTokens",
-      type: "number",
-      label: "Reflect + dropper threshold",
-      description: "Tokens accumulated since last reflect before triggering reflector and dropper",
-      value: cfg.reflectAfterTokens,
-      min: 1_000,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "observationsPoolMaxTokens",
-      type: "number",
-      label: "Observation pool max",
-      description:
-        "Full-fold pressure and max estimated rendered observation-line tokens in compaction output",
-      value: cfg.observationsPoolMaxTokens,
-      min: 1_000,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "reflectionsPoolMaxTokens",
-      type: "number",
-      label: "Reflection output max",
-      description:
-        "Max estimated rendered reflection-line tokens in compaction output. 0 disables the cap. Full source records remain available through recall.",
-      value: cfg.reflectionsPoolMaxTokens,
-      min: 0,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "observationsPoolTargetTokens",
-      type: "number",
-      label: "Observation pool target",
-      description: "Target tokens after dropper prunes (defaults to half of pool max)",
-      value: cfg.observationsPoolTargetTokens,
-      min: 500,
-      max: 200_000,
-      step: 500,
-    },
-    {
-      key: "reflectorInputMaxTokens",
-      type: "number",
-      label: "Reflector input max",
-      description: "Max prompt tokens for reflector model input (rolling window cap)",
-      value: cfg.reflectorInputMaxTokens,
-      min: 1_000,
-      max: 500_000,
-      step: 1_000,
-    },
-    {
-      key: "dropperInputMaxTokens",
-      type: "number",
-      label: "Dropper input max",
-      description: "Max prompt tokens for dropper model input (rolling window cap)",
-      value: cfg.dropperInputMaxTokens,
-      min: 1_000,
-      max: 500_000,
-      step: 1_000,
-    },
-    {
-      key: "observerChunkMaxTokens",
-      type: "number",
-      label: "Observer chunk max",
-      description: "Max source entry tokens sent to observer per chunk",
-      value: cfg.observerChunkMaxTokens,
-      min: 1_000,
-      max: 200_000,
-      step: 1_000,
-    },
-    {
-      key: "observerPreambleMaxTokens",
-      type: "number",
-      label: "Observer preamble max",
-      description: "Preamble budget in manual compaction mode (0=auto-compute 30% of chunk)",
-      value: cfg.observerPreambleMaxTokens,
-      min: 0,
-      max: 100_000,
-      step: 500,
-    },
+    numericField("observeAfterTokens", cfg),
+    numericField("reflectAfterTokens", cfg),
+    numericField("observationsPoolMaxTokens", cfg),
+    numericField("reflectionsPoolMaxTokens", cfg),
+    numericField("observationsPoolTargetTokens", cfg),
+    numericField("reflectorInputMaxTokens", cfg),
+    numericField("dropperInputMaxTokens", cfg),
+    numericField("observerChunkMaxTokens", cfg),
+    numericField("observerPreambleMaxTokens", cfg),
     {
       key: "dropperPressureThreshold",
       type: "number",
@@ -337,27 +236,8 @@ export const config = new ConfigManager<UnifiedConfig>({
       max: 1,
       step: 0.01,
     },
-    {
-      key: "agentMaxTurns",
-      type: "number",
-      label: "Max turns per agent",
-      description: "Shared turn cap for background memory agents",
-      value: cfg.agentMaxTurns,
-      min: 1,
-      max: 100,
-      step: 1,
-    },
-    {
-      key: "providerIdleTimeoutMs",
-      type: "number",
-      label: "Provider idle timeout (ms)",
-      description:
-        "Body-idle timeout for background provider streams; 0 = disabled, unset = inherit pi's default",
-      value: cfg.providerIdleTimeoutMs ?? 0,
-      min: 0,
-      max: 3_600_000,
-      step: 1000,
-    },
+    numericField("agentMaxTurns", cfg),
+    numericField("providerIdleTimeoutMs", cfg),
     {
       key: "cacheRetention",
       type: "enum",
@@ -546,35 +426,10 @@ export const config = new ConfigManager<UnifiedConfig>({
     const merged = { ...DEFAULTS, ...parsed } as UnifiedConfig;
 
     // ── Numeric field validation ──
-    const REQUIRED_NUMERIC_KEYS: readonly (keyof UnifiedConfig)[] = [
-      "observeAfterTokens",
-      "reflectAfterTokens",
-      "retainedToolOutputMaxTokens",
-      "recallResponseMaxChars",
-      "observationsPoolMaxTokens",
-      "reflectionsPoolMaxTokens",
-      "observationsPoolTargetTokens",
-      "reflectorInputMaxTokens",
-      "dropperInputMaxTokens",
-      "observerChunkMaxTokens",
-      "observerPreambleMaxTokens",
-      "agentMaxTurns",
-    ];
-    for (const k of REQUIRED_NUMERIC_KEYS) {
-      // SAFETY: merged is a plain config object; indexing by dynamic key needs
-      // the Record view to read/write numeric fields uniformly.
-      const v = (merged as unknown as Record<string, unknown>)[k];
-      const minVal = k === "observerPreambleMaxTokens" || k === "reflectionsPoolMaxTokens" || k === "recallResponseMaxChars" || k === "retainedToolOutputMaxTokens" ? 0 : 1;
-      if (
-        typeof v !== "number" ||
-        !Number.isFinite(v) ||
-        ((k === "retainedToolOutputMaxTokens" || k === "recallResponseMaxChars" || k === "reflectionsPoolMaxTokens") &&
-          !Number.isInteger(v)) ||
-        v < minVal
-      ) {
-        // SAFETY: dynamic-key write as above; DEFAULTS[k] is always a number
-        // for keys in REQUIRED_NUMERIC_KEYS.
-        (merged as unknown as Record<string, unknown>)[k] = DEFAULTS[k];
+    for (const key of NUMERIC_KEYS) {
+      if (!validNumericValue(key, merged[key])) {
+        // Defaults may deliberately omit optional worker tuning.
+        (merged as unknown as Record<string, unknown>)[key] = DEFAULTS[key];
       }
     }
 
@@ -590,13 +445,7 @@ export const config = new ConfigManager<UnifiedConfig>({
       merged.dropperPoolFullnessThreshold = DEFAULTS.dropperPoolFullnessThreshold;
     }
 
-    // observationsPoolTargetTokens — must be < max
-    if (
-      merged.observationsPoolTargetTokens === undefined ||
-      merged.observationsPoolTargetTokens >= merged.observationsPoolMaxTokens
-    ) {
-      merged.observationsPoolTargetTokens = Math.floor(merged.observationsPoolMaxTokens / 2);
-    }
+    normalizePoolTarget(merged);
 
     return merged;
   },
