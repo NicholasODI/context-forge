@@ -136,13 +136,32 @@ describe("portable project observational memory", () => {
 });
 
 function host(enabled = true, trusted = true) {
-  const handlers = new Map<string, Function>(); let tool: any;
+  const handlers = new Map<string, Function>(); let tool: any, command: any;
   const ctx: any = { cwd: root, isProjectTrusted: () => trusted, ui: { notify: vi.fn() }, sessionManager: { getSessionId: () => "A", getBranch: () => branch() } };
-  const pi: any = { registerTool: (t: any) => { tool = t; }, registerCommand: vi.fn(), on: (n: string, f: Function) => handlers.set(n, f), newSession: vi.fn(), appendEntry: vi.fn() };
+  const pi: any = { registerTool: (t: any) => { tool = t; }, registerCommand: (_name: string, c: any) => { command = c; }, on: (n: string, f: Function) => handlers.set(n, f), newSession: vi.fn(), appendEntry: vi.fn() };
   const registration = registerProjectMemory(pi, () => enabled); registration.registerContext();
-  return { pi, ctx, tool, handlers, registration, context: handlers.get("context")! };
+  return { pi, ctx, tool, command, handlers, registration, context: handlers.get("context")! };
 }
 describe("user-initiated session boundary", () => {
+  it("reports actual saved/unchanged entries rather than claiming an empty sync was saved", async () => {
+    const h = host();
+    const getBranch = h.ctx.sessionManager.getBranch;
+    h.ctx.sessionManager.getBranch = () => [];
+    await h.command.handler("sync", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("no checkpoint was created"), "info");
+    h.ctx.sessionManager.getBranch = getBranch;
+    await h.command.handler("sync", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("saved: 3 OM entries"), "info");
+    await h.command.handler("sync", h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("unchanged: 3 OM entries"), "info");
+  });
+  it("fails closed without a trust method instead of assuming that a reduced context is trusted", async () => {
+    const h = host();
+    delete h.ctx.isProjectTrusted;
+    await h.registration.checkpoint(h.ctx);
+    expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("requires the full host context"), "warning");
+    await expect(readdir(join(root, ".context-forge"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
   it("captures A then orients empty B without session creation, cursor transfer or transcript injection", async () => {
     const h = host();
     await h.handlers.get("agent_end")!({}, h.ctx);

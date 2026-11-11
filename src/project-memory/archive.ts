@@ -27,6 +27,7 @@ export interface ArchiveRecord {
   sessionId: string; object: string; observedAt: string; sources: Source[];
 }
 export interface ArchiveView { records: ArchiveRecord[]; sessions: number; objects: number; limited: boolean; warnings: string[] }
+export interface ArchiveCheckpoint { outcome: "saved" | "unchanged" | "empty"; objects: number }
 const valid = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 
 /** Pending facts are portable, pending cursors/worker lifecycle never are. */
@@ -147,17 +148,17 @@ export class ProjectArchive {
     }
     return { sessions, total: names.length, nextOffset: offset + limit < names.length ? offset + limit : null };
   }
-  async sync(root: string, sessionId: string, entries: Entry[]): Promise<void> {
+  async sync(root: string, sessionId: string, entries: Entry[]): Promise<ArchiveCheckpoint> {
     const memory = entries.filter(isMemoryEntry);
     if (memory.length > MAX_OBJECTS) throw new Error("Archive branch exceeds 4096 OM entries; existing checkpoint unchanged");
     if (!memory.length) {
       // An empty fork retires the old current-branch view. A genuinely new
       // empty session/project still creates no files.
       const paths = await directories(root);
-      if (!paths || !(await readBoundedMemoryFile(join(paths.sessions, `${hash(sessionId)}.json`), MAX_MANIFEST))) return;
+      if (!paths || !(await readBoundedMemoryFile(join(paths.sessions, `${hash(sessionId)}.json`), MAX_MANIFEST))) return { outcome: "empty", objects: 0 };
     }
     const key = `${root}:${sessionId}`, signature = hash(memory.map(e => e.id).join(","));
-    if (this.signatures.get(key) === signature) return;
+    if (this.signatures.get(key) === signature) return { outcome: "unchanged", objects: memory.length };
     const paths = (await directories(root, true))!;
     const sessionKey = hash(sessionId), lock = join(paths.sessions, `${sessionKey}.lock`);
     try { await mkdir(lock); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Archive capture busy; next hook retries. Inspect an abandoned .lock before removing it."); throw e; }
@@ -196,6 +197,7 @@ export class ProjectArchive {
       this.signatures.set(key, signature);
       this.views.clear();
       while (this.signatures.size > 128) this.signatures.delete(this.signatures.keys().next().value!);
+      return { outcome: "saved", objects: objects.length };
     } finally { await rm(lock, { recursive: true, force: true }); }
   }
   async read(root: string, options: { sessionId?: string; object?: string } = {}): Promise<ArchiveView> {
