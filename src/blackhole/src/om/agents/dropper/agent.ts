@@ -244,6 +244,20 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
       // the plain schema on this definition; bind the typed shape here.
       const params = rawParams as DropObservationsArgs;
       toolCallCount++;
+      // Some hosts continue executing queued calls (or ignore terminate).
+      // A validated complete=true closes the evaluation permanently. Later
+      // calls cannot add drops, replace accepted proofs or revoke that close.
+      if (closedByCompleteBatch || protocolFailure) {
+        const reason = closedByCompleteBatch ? "evaluation_already_complete" : "evaluation_already_failed";
+        debugLog("dropper.tool_call.ignored", { reason, toolCallCount, totalCandidates: proposedDropIds.length });
+        return {
+          content: [{ type: "text" as const, text: closedByCompleteBatch
+            ? "Evaluation already complete. No further proposals were processed; the validated result is unchanged."
+            : "Evaluation already failed. No further proposals were processed; no coverage will advance." }],
+          details: { ignored: true, reason, complete: closedByCompleteBatch },
+          terminate: true,
+        };
+      }
       rawRequestedIdsCount += params.ids.length;
       const seenInRequest = new Set<string>();
       let added = 0;
@@ -382,9 +396,12 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
     convertToLlm: (msgs) => msgs as Message[],
     toolExecution: "sequential",
     ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(turnCap
-      ? { shouldStopAfterTurn: turnCap.shouldStopAfterTurn, finishTurn: turnCap.finishTurn }
-      : {}),
+    // Support both loop generations even when no turn cap is configured.
+    // Native hosts may not honor terminate on the tool result.
+    shouldStopAfterTurn: (ctx) =>
+      closedByCompleteBatch || protocolFailure !== undefined || (turnCap?.shouldStopAfterTurn(ctx) ?? false),
+    finishTurn: (ctx) =>
+      closedByCompleteBatch || protocolFailure !== undefined ? { action: "end" } : turnCap?.finishTurn(ctx),
   };
 
   const loop = args.agentLoop ?? agentLoop;
