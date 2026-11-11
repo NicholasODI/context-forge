@@ -133,7 +133,11 @@ async function directory(root: string, create = false): Promise<string | null> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (!create) return null;
-    await mkdir(dir);
+    try { await mkdir(dir); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const info = await lstat(dir);
+      if (!info.isDirectory() || info.isSymbolicLink()) fail(`${MEMORY_DIRECTORY} must be a real directory`);
+    }
   }
   if (!inside(await realpath(root), await realpath(dir))) fail("storage directory escapes project root");
   return dir;
@@ -276,6 +280,9 @@ async function atomicWrite(path: string, contents: string): Promise<void> {
     await rename(temporary, path);
   } finally { await rm(temporary, { force: true }); }
 }
+
+// Shared project storage boundaries for the portable OM archive.
+export { directory as memoryDirectory, safeRead as readBoundedMemoryFile, atomicWrite as replaceMemoryFile };
 
 function evidenceLines(record: MemoryRecord): string[] {
   const e = record.evidence;

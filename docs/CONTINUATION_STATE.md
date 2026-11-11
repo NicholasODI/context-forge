@@ -1,6 +1,9 @@
 # Focused continuation state
 
 Context-forge stores one project working state and projects it as reference data.
+Portable session OM and automatic orientation are described in
+[SESSION_HANDOFF.md](SESSION_HANDOFF.md); archive capsules are separate from
+the revision-checked task state and do not import worker cursors.
 It does not authorize tasks, infer user intent from arbitrary conversation text,
 retry failed actions, or invoke an advisor. Latest explicit user instructions
 always control; a generic “continue” does not authorize unrelated historical work.
