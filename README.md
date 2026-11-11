@@ -129,8 +129,9 @@ worker completion rules, pruning safeguards, retention controls, and limits.
 
 The `projectMemory` feature (default `true`) complements observational memory with
 explicit project state and focused compaction handoffs. It does **not** change
-worker thresholds or the observational-memory ledger. No files are created until the agent calls the
-`project_memory` tool to write a record in a trusted project.
+worker thresholds or the observational-memory ledger. In a trusted project it
+automatically archives existing OM records for later sessions. Task/decision
+files are created only by explicit `project_memory` writes.
 
 To start, ask: **“Record our current goal, completed progress, blockers, and next steps in
 project memory. Record important decisions with their rationale and evidence.”**
@@ -146,6 +147,7 @@ directory for a non-Git project:
 | `.context-forge/TASK.md` | Current goal, status, progress, next steps, and evidence |
 | `.context-forge/DECISIONS.md` | Decisions and rationale, including invalidated and superseded history |
 | `.context-forge/memory.json` | Authoritative structured state, evidence fingerprints, and revision |
+| `.context-forge/archive/` | Portable observations/reflections, lifecycle markers and bounded source excerpts |
 
 The Markdown files are generated views. Update through the tool; existing
 user-authored files with these names are not overwritten. You may commit these
@@ -153,6 +155,13 @@ files for review and handoff, but the extension never commits them or edits
 `AGENTS.md`. Do not record secrets. `/forge-memory` displays current state;
 `/forge-memory refresh` regenerates the Markdown views without rerunning checks
 or declaring evidence valid again.
+
+**You start new sessions yourself.** The extension automatically supplies a
+bounded orientation from this folder in the next trusted session; it never
+creates sessions or authorizes old tasks. Use `project_memory action=recall`
+for cross-session memory, and `/forge-memory sync` to explicitly checkpoint
+the current session before leaving. Copy the whole folder to move it to another
+machine. See [Session handoff](docs/SESSION_HANDOFF.md) for limits and recovery.
 
 The tool supports `read`, `diagnostics`, `set_task`, `update_task`, `complete_task`,
 `record_decision`, `verify`, `invalidate`,

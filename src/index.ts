@@ -45,6 +45,9 @@ export function createContextForgeExtension(
 			omRuntime.configLoaded = true;
 		});
 		const projectMemory = registerProjectMemory(pi, ctx => loadConfig(ctx).projectMemory);
+		// launch contexts are the host extension context; the archive callback
+		// rechecks trust/config and snapshots the live manager, without worker cursors.
+		omRuntime.onConsolidationSettled = ctx => projectMemory.checkpoint(ctx as ExtensionContext);
 
 		pi.on("session_start", async (_event, ctx) => {
 			if (initialized) return;

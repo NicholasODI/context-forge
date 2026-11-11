@@ -290,6 +290,8 @@ export class Runtime {
   private sessionIdentity: string | undefined;
   private disposed = false;
   lastMemoryContext?: import("./ledger/diagnostics.js").ContextObservation;
+  /** Optional project persistence; never schedules another worker or session. */
+  onConsolidationSettled?: (ctx: LaunchCtx) => Promise<void>;
 
   private lifecycleController = new AbortController();
   private compactionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1109,7 +1111,13 @@ export class Runtime {
   launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
     this.consolidationInFlight = true;
     this.consolidationPhase = undefined;
-    const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
+    const promise = this.launchTrackedTask(ctx, "consolidation", async () => {
+      try { await work(); }
+      finally {
+        // Archive failures are independent of successful worker commits.
+        try { await this.onConsolidationSettled?.(ctx); } catch { /* next context/checkpoint retries */ }
+      }
+    }, () => {
       this.consolidationInFlight = false;
       this.consolidationPhase = undefined;
       if (this.consolidationPromise === promise) this.consolidationPromise = null;
