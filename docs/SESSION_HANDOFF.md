@@ -20,6 +20,8 @@ compaction are replaced. No extra LLM, embedding or advisor call is made.
 4. Optionally run /forge-memory sync before leaving, especially when upgrading
    an existing long session. This checkpoints existing branch/pending OM data;
    it does not run workers, compact, or change a task's status.
+   The result reports saved/unchanged ledger-entry counts, or explicitly says
+   that no checkpoint was created. One ledger entry may contain several facts.
 5. Create a new session yourself in the same project and state the new task.
    The extension reads the folder and injects one bounded orientation
    automatically. The model does not need to discover the folder by a tool call.

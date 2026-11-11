@@ -64,12 +64,13 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
   const receipts = new CheckReceipts();
   const archive = new ProjectArchive();
   const checkpoint = async (ctx: ExtensionContext, resolvedRoot?: string) => {
-    if (!enabled(ctx) || !ctx.isProjectTrusted()) return;
-    if (typeof ctx.sessionManager.getBranch !== "function") return;
+    if (typeof ctx.isProjectTrusted !== "function") throw new Error("Archive checkpoint requires the full host context with project trust capability; no data was written.");
+    if (!enabled(ctx) || !ctx.isProjectTrusted()) return { outcome: "not-permitted" as const, objects: 0 };
+    if (typeof ctx.sessionManager.getBranch !== "function") throw new Error("Archive checkpoint requires the live session branch; no data was written.");
     // Snapshot identity/branch together before awaiting filesystem work. No cursors transfer.
     const id = ctx.sessionManager.getSessionId(), entries = ctx.sessionManager.getBranch() as Entry[];
     const pending = pendingArchiveEntries(readPendingState(id));
-    await archive.sync(resolvedRoot ?? await projectRoot(ctx.cwd), id, [...entries, ...pending]);
+    return archive.sync(resolvedRoot ?? await projectRoot(ctx.cwd), id, [...entries, ...pending]);
   };
   const safeCheckpoint = async (ctx: ExtensionContext, resolvedRoot?: string) => {
     try { await checkpoint(ctx, resolvedRoot); }
@@ -145,7 +146,13 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
       try {
         permitted(ctx);
         if (!["", "refresh", "diagnostics", "sync"].includes(args.trim())) throw new Error("Usage: /forge-memory [refresh|diagnostics|sync]");
-        if (args.trim() === "sync") { await checkpoint(ctx); ctx.ui.notify("Project archive checkpoint saved where committed OM records exist. Start a new session yourself; no session was created.", "info"); return; }
+        if (args.trim() === "sync") {
+          const result = await checkpoint(ctx);
+          const message = result.outcome === "empty" ? "No observational memory entries found in this session or its pending batches; no checkpoint was created."
+            : result.outcome === "not-permitted" ? "Project archive checkpoint skipped: project memory is disabled or the project is untrusted."
+            : `Project archive ${result.outcome}: ${result.objects} OM entries in this session checkpoint. Start a new session yourself; no session was created.`;
+          ctx.ui.notify(message, "info"); return;
+        }
         const root = await projectRoot(ctx.cwd);
         const state = args.trim() === "refresh" ? await refreshDocuments(root) : await readMemory(root);
         if (args.trim() === "diagnostics") {

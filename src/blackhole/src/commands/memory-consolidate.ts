@@ -12,7 +12,6 @@
 import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime } from "../om/runtime.ts";
 import { triggerConsolidation } from "../om/consolidation.ts";
-import type { ConsolidationCtx } from "../om/consolidation.ts";
 
 /** User-facing text for each internal skip reason. */
 const SKIP_MESSAGES: Record<string, string> = {
@@ -32,15 +31,10 @@ export function registerMemoryConsolidateCommand(pi: ExtensionAPI, runtime: Runt
       "Manually launch the memory consolidation pipeline now (observer → reflector → dropper). " +
       "Runs through the same guards as the automatic trigger; reports the skip reason if it cannot launch.",
     handler: async (_args, ctx: ExtensionCommandContext) => {
-      const omCtx: ConsolidationCtx = {
-        cwd: ctx.cwd,
-        hasUI: ctx.hasUI,
-        ui: ctx.ui,
-        model: ctx.model,
-        modelRegistry: ctx.modelRegistry,
-        sessionManager: ctx.sessionManager,
-      };
-      const result = triggerConsolidation(pi, runtime, omCtx);
+      // Preserve the host context, including prototype methods and receivers.
+      // The completion checkpoint needs its live trust/config capabilities;
+      // projecting only worker fields strips isProjectTrusted().
+      const result = triggerConsolidation(pi, runtime, ctx);
       if (result.outcome === "launched") {
         ctx.ui.notify(
           "Consolidation launched (observer → reflector → dropper). Check /blackhole-memory for progress.",
