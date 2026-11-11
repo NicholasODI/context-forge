@@ -1,3 +1,4 @@
+import { NUMERIC_KEYS, validNumericValue, normalizePoolTarget } from "./numeric-fields.js";
 /**
  * Unified configuration loader — merges pi-vcc + OM settings into one file.
  *
@@ -626,22 +627,6 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
 
   // Numeric fields — use nonNegativeInt for keys where 0 is meaningful
   // (observerPreambleMaxTokens 0 = auto, retainedToolOutputMaxTokens 0 = disabled)
-  const numKeys = [
-    "observeAfterTokens",
-    "reflectAfterTokens",
-    "retainedToolOutputMaxTokens",
-    "recallResponseMaxChars",
-    "observationsPoolMaxTokens",
-    "reflectionsPoolMaxTokens",
-    "observationsPoolTargetTokens",
-    "reflectorInputMaxTokens",
-    "dropperInputMaxTokens",
-    "observerChunkMaxTokens",
-    "observerPreambleMaxTokens",
-    "agentMaxTurns",
-    "workerOutputMaxTokens",
-    "providerIdleTimeoutMs",
-  ] as const;
 
   // dropperPressureThreshold: fractional, must be in (0, 1]
   if (
@@ -664,19 +649,9 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   for (const k of THRESHOLD_BLUNT_KEYS) {
     if (raw[k] !== undefined) (c as Record<string, unknown>)[k] = raw[k];
   }
-  for (const k of numKeys) {
-    // observerPreambleMaxTokens and timeout fields accept 0 (disabled/inherit);
-    // everything else must be > 0.
-    const validator =
-      k === "observerPreambleMaxTokens" ||
-      k === "providerIdleTimeoutMs" ||
-      k === "retainedToolOutputMaxTokens" || // 0 = disabled (opt-in)
-      k === "recallResponseMaxChars" || // 0 = unbounded (opt-out)
-      k === "reflectionsPoolMaxTokens" // 0 = uncapped
-        ? nonNegativeInt
-        : positiveInt;
-    const v = validator(raw[k]);
-    if (v !== undefined) (c as Record<string, unknown>)[k] = v;
+  for (const key of NUMERIC_KEYS) {
+    const value = raw[key];
+    if (validNumericValue(key, value)) (c as Record<string, unknown>)[key] = value;
   }
   // SAFETY: c is a plain config record; the normalizer only validates or deletes named properties.
   // Runs after the numKeys pass so its bounds (e.g. MAX_TIMER_DELAY_MS) are
@@ -842,6 +817,7 @@ export function loadUnifiedConfig(cwd: string, onWarn?: WarnFn): UnifiedConfig {
 
   // Merge defaults then override
   const merged = { ...DEFAULTS, ...parsed };
+  normalizePoolTarget(merged);
 
   // ── Env override — compaction ──
   const envCompaction = process.env.PI_BLACKHOLE_COMPACTION;
