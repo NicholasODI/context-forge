@@ -87,13 +87,16 @@ describe("main-session project memory integration", () => {
     for (const messages of [before, after]) {
       const result = await context({ messages }, ctx);
       const wire = convertToLlm(result.messages);
-      expect(JSON.stringify(wire)).toContain("Fix the resumed-session observer");
+      expect(wire[0]).toEqual(messages[0]);
+      expect(JSON.stringify(wire[1])).toContain("Context Forge automatically adds and refreshes this background reminder");
+      expect(JSON.stringify(wire[1])).toContain("Friendly reminder: Fix the resumed-session observer");
       expect(JSON.stringify(wire)).toContain("Run the bounded regression");
       expect(messages).toHaveLength(1); // no mutation or transcript append
     }
     const first = await context({ messages: before }, ctx);
     const second = await context(first, ctx);
     expect(second.messages).toHaveLength(2); // replacement, never accumulation
+    expect(JSON.stringify(convertToLlm(second.messages)).match(/Friendly reminder:/g)).toHaveLength(1);
   });
 
   it("refreshes stale labels on each request without rewriting source", async () => {
