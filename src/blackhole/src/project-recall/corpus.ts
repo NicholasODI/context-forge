@@ -22,9 +22,8 @@ import {
   readSync,
   closeSync,
   readdirSync,
-  statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   OM_OBSERVATIONS_RECORDED,
@@ -339,223 +338,155 @@ function extractFromPendingState(
   }
 }
 
-/**
- * Build the observational-memory corpus for one project.
- * Scoping: one scope folder = one project (plan-07 §19.5 author note) — the
- * cwd-encoded scope dir is primary; the git-root-encoded dir is a secondary
- * candidate when it differs (catches sessions launched from the repo root).
- * Sync by design — bounded by those project-owned files only.
- */
-export function buildProjectMemoryCorpus(options: BuildCorpusOptions): ProjectCorpus {
-  const agentDir = options.agentDir ?? getAgentDir();
-  const projectRoot = options.gitRoot || options.cwd;
-  const activeSessionFile = options.activeSessionFile
-    ? existsSync(options.activeSessionFile)
-      ? options.activeSessionFile
-      : undefined
-    : undefined;
-
-  const corpus: ProjectCorpus = {
+function emptyCorpus(projectRoot: string): ProjectCorpus {
+  return {
     projectRoot,
     sessionsConsidered: 0,
     filesWithMarkers: 0,
     observations: [],
     reflections: [],
-    droppedIds: new Set<string>(),
-    knownSessionIds: new Set<string>(),
+    droppedIds: new Set(),
+    knownSessionIds: new Set(),
     orphanedSessions: 0,
   };
+}
 
-  const candidateDirs = [
-    ...new Set([
-      encodeScopeDir(options.cwd),
-      ...(options.gitRoot && options.gitRoot !== options.cwd
-        ? [encodeScopeDir(options.gitRoot)]
-        : []),
-    ]),
-  ].map((scope) => join(agentDir, "sessions", scope));
+function readDirectory(path: string): string[] {
+  try {
+    return readdirSync(path);
+  } catch {
+    return [];
+  }
+}
+
+function* projectSessionFiles(sessionsRoot: string, scopes: Set<string>, activeFile?: string) {
   const seenFiles = new Set<string>();
+  for (const scope of scopes) {
+    const directory = join(sessionsRoot, scope);
+    for (const file of readDirectory(directory)) {
+      if (!file.endsWith(".jsonl") || seenFiles.has(file)) continue;
+      seenFiles.add(file);
+      const path = join(directory, file);
+      if (path !== activeFile) yield path;
+    }
+  }
+}
 
-  for (const scopeDir of candidateDirs) {
-    let files: string[];
+function scanSessionFile(corpus: ProjectCorpus, path: string): void {
+  corpus.sessionsConsidered++;
+  const sessionId = parseSessionHeader(readFirstLine(path))?.id || basename(path, ".jsonl");
+  corpus.knownSessionIds.add(sessionId);
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch {
+    return;
+  }
+  if (!raw.includes("om.")) return;
+  corpus.filesWithMarkers++;
+
+  const entries: Array<Record<string, unknown>> = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
     try {
-      if (!statSync(scopeDir).isDirectory()) continue;
-      files = readdirSync(scopeDir);
+      entries.push(JSON.parse(trimmed));
+    } catch {
+      // Like the host, continue past corrupt lines.
+    }
+  }
+  extractFromEntries(entries, sessionId, corpus.observations, corpus.reflections, corpus.droppedIds);
+}
+
+function otherSessionIds(sessionsRoot: string, projectScopes: Set<string>): Set<string> {
+  const ids = new Set<string>();
+  for (const scope of readDirectory(sessionsRoot)) {
+    if (projectScopes.has(scope)) continue;
+    const directory = join(sessionsRoot, scope);
+    for (const file of readDirectory(directory)) {
+      if (!file.endsWith(".jsonl")) continue;
+      const header = parseSessionHeader(readFirstLine(join(directory, file)));
+      const id = header?.id || file.slice(file.lastIndexOf("_") + 1, -6);
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+/** Yield after each attributed or orphaned buffer so callers can pace the scan. */
+function* scanPendingBuffers(
+  corpus: ProjectCorpus,
+  agentDir: string,
+  sessionsRoot: string,
+  projectScopes: Set<string>,
+): Generator<void> {
+  const pendingDir = join(agentDir, PENDING_DIR);
+  const files = readDirectory(pendingDir);
+  const mains = new Set(files.filter(file => file.endsWith(PENDING_SUFFIX)));
+  let foreignIds: Set<string> | undefined;
+
+  for (const file of files) {
+    const isMain = file.endsWith(PENDING_SUFFIX);
+    if (!isMain && !file.endsWith(STALE_SUFFIX)) continue;
+    const sessionId = file.slice(0, -(isMain ? PENDING_SUFFIX : STALE_SUFFIX).length);
+    if (!sessionId || (!isMain && mains.has(sessionId + PENDING_SUFFIX))) continue;
+
+    let state: PendingState;
+    try {
+      state = JSON.parse(readFileSync(join(pendingDir, file), "utf-8"));
     } catch {
       continue;
     }
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
-      const filePath = join(scopeDir, file);
-      if (activeSessionFile && filePath === activeSessionFile) continue;
+    if (!state) continue;
+    const hasBatches = [state.observationBatches, state.unanchoredBatches, state.reflectionBatches, state.droppedBatches]
+      .some(batches => Array.isArray(batches) && batches.length > 0);
+    const hasLegacyBatch = [state.observation, state.reflection, state.dropped]
+      .some(batch => typeof batch === "object" && batch !== null);
+    if (!hasBatches && !hasLegacyBatch) continue;
 
-      corpus.sessionsConsidered++;
-      const header = parseSessionHeader(readFirstLine(filePath));
-      const sessionId = header?.id || file.slice(0, -6);
-      corpus.knownSessionIds.add(sessionId);
-
-      let raw: string;
-      try {
-        raw = readFileSync(filePath, "utf-8");
-      } catch {
-        continue;
-      }
-      if (!raw.includes("om.")) continue;
-      corpus.filesWithMarkers++;
-
-      const entries: Array<Record<string, unknown>> = [];
-      for (const line of raw.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          entries.push(JSON.parse(trimmed));
-        } catch {
-          // corrupt lines are silently dropped by pi too
-        }
-      }
-      extractFromEntries(
-        entries,
-        sessionId,
-        corpus.observations,
-        corpus.reflections,
-        corpus.droppedIds,
-      );
+    const attributed = corpus.knownSessionIds.has(sessionId);
+    if (!attributed) {
+      foreignIds ??= otherSessionIds(sessionsRoot, projectScopes);
+      if (foreignIds.has(sessionId)) continue;
+      corpus.orphanedSessions++;
     }
+    extractFromPendingState(
+      state,
+      sessionId,
+      attributed ? "pending" : "orphan",
+      corpus.observations,
+      corpus.reflections,
+      corpus.droppedIds,
+    );
+    yield;
   }
+}
 
-  // Phase 2b: pending buffers, attributed or orphaned
-  // Pending files are global (one dir for all projects). A pending file
-  // whose sessionId is not in the project-scoped knownSessionIds may be:
-  //  - foreign: session still exists under another project's scope dir
-  //  - truly orphaned: no session JSONL exists anywhere
-  // Only the latter should appear in the "Unattributed" section; foreign
-  // pending files are ignored for this project's export.
-  const pendingDir = join(agentDir, PENDING_DIR);
-  if (existsSync(pendingDir)) {
-    let files: string[];
-    try {
-      files = readdirSync(pendingDir);
-    } catch {
-      files = [];
-    }
-    const mains = new Set<string>();
-    for (const file of files) {
-      if (file.endsWith(PENDING_SUFFIX)) {
-        mains.add(file.slice(0, -PENDING_SUFFIX.length));
-      }
-    }
+function prepareScan(options: BuildCorpusOptions) {
+  const agentDir = options.agentDir ?? getAgentDir();
+  const sessionsRoot = join(agentDir, "sessions");
+  const projectRoot = options.gitRoot || options.cwd;
+  const scopes = new Set([encodeScopeDir(options.cwd), encodeScopeDir(projectRoot)]);
+  const activeFile = options.activeSessionFile && existsSync(options.activeSessionFile)
+    ? options.activeSessionFile
+    : undefined;
+  return {
+    corpus: emptyCorpus(projectRoot),
+    files: projectSessionFiles(sessionsRoot, scopes, activeFile),
+    agentDir,
+    sessionsRoot,
+    scopes,
+  };
+}
 
-    // Build a global session-id index for orphan vs foreign disambiguation.
-    // This is a single scan of ~/.pi/agent/sessions/*/*.jsonl — cheap
-    // (~1k files) and only needed when pending files exist.
-    let globalSessionIds: Set<string> | null = null;
-    const ensureGlobalIds = (): Set<string> => {
-      if (globalSessionIds) return globalSessionIds;
-      globalSessionIds = new Set<string>(corpus.knownSessionIds);
-      const sessionsRoot = join(agentDir, "sessions");
-      let scopes: string[];
-      try {
-        scopes = readdirSync(sessionsRoot);
-      } catch {
-        return globalSessionIds;
-      }
-      for (const scope of scopes) {
-        const scopePath = join(sessionsRoot, scope);
-        let st: ReturnType<typeof statSync> | null = null;
-        try {
-          st = statSync(scopePath);
-        } catch {
-          continue;
-        }
-        if (!st.isDirectory()) continue;
-        // Skip already-scanned project scopes to avoid re-reading
-        // headers — we already have those ids in knownSessionIds.
-        const isProjectScope =
-          scope === encodeScopeDir(options.cwd) ||
-          (options.gitRoot &&
-            options.gitRoot !== options.cwd &&
-            scope === encodeScopeDir(options.gitRoot));
-        if (isProjectScope) continue;
-        let scopeFiles: string[];
-        try {
-          scopeFiles = readdirSync(scopePath);
-        } catch {
-          continue;
-        }
-        for (const f of scopeFiles) {
-          if (!f.endsWith(".jsonl")) continue;
-          const header = parseSessionHeader(readFirstLine(join(scopePath, f)));
-          const sid =
-            header?.id || (f.includes("_") ? f.slice(f.lastIndexOf("_") + 1, -6) : f.slice(0, -6));
-          if (sid) globalSessionIds.add(sid);
-        }
-      }
-      return globalSessionIds;
-    };
-
-    for (const file of files) {
-      const isMain = file.endsWith(PENDING_SUFFIX);
-      const isStale = file.endsWith(STALE_SUFFIX);
-      if (!isMain && !isStale) continue;
-      const sessionId = isMain
-        ? file.slice(0, -PENDING_SUFFIX.length)
-        : file.slice(0, -STALE_SUFFIX.length);
-      if (!sessionId) continue;
-      // Prefer the main file; only fall back to the stale backup when absent.
-      if (isStale && mains.has(sessionId)) continue;
-
-      let state: PendingState;
-      try {
-        state = JSON.parse(readFileSync(join(pendingDir, file), "utf-8"));
-      } catch {
-        continue;
-      }
-
-      const hasBatches =
-        (Array.isArray(state.observationBatches) && state.observationBatches.length > 0) ||
-        (Array.isArray(state.unanchoredBatches) && state.unanchoredBatches.length > 0) ||
-        (Array.isArray(state.reflectionBatches) && state.reflectionBatches.length > 0) ||
-        (Array.isArray(state.droppedBatches) && state.droppedBatches.length > 0) ||
-        // Legacy / singular form: older pending files may only have the
-        // singular observation/reflection/dropped keys without batch arrays.
-        (typeof (state as Record<string, unknown>).observation === "object" &&
-          (state as Record<string, unknown>).observation !== null) ||
-        (typeof (state as Record<string, unknown>).reflection === "object" &&
-          (state as Record<string, unknown>).reflection !== null) ||
-        (typeof (state as Record<string, unknown>).dropped === "object" &&
-          (state as Record<string, unknown>).dropped !== null);
-      if (!hasBatches) continue;
-
-      if (corpus.knownSessionIds.has(sessionId)) {
-        extractFromPendingState(
-          state,
-          sessionId,
-          "pending",
-          corpus.observations,
-          corpus.reflections,
-          corpus.droppedIds,
-        );
-      } else {
-        // Distinguish foreign (session exists elsewhere) from truly orphaned
-        // (no session file anywhere). Only the latter is rendered as
-        // "Unattributed pending memory"; foreign pending is ignored.
-        const gids = ensureGlobalIds();
-        if (gids.has(sessionId)) continue;
-        corpus.orphanedSessions++;
-        extractFromPendingState(
-          state,
-          sessionId,
-          "orphan",
-          corpus.observations,
-          corpus.reflections,
-          corpus.droppedIds,
-        );
-      }
-    }
+/** Build the project corpus without yielding between files. */
+export function buildProjectMemoryCorpus(options: BuildCorpusOptions): ProjectCorpus {
+  const { corpus, files, agentDir, sessionsRoot, scopes } = prepareScan(options);
+  for (const path of files) scanSessionFile(corpus, path);
+  for (const _ of scanPendingBuffers(corpus, agentDir, sessionsRoot, scopes)) {
+    // The scan updates the corpus before each yield.
   }
-
   return corpus;
 }
 
@@ -571,240 +502,28 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-/**
- * Async variant that yields to the event loop every few files so the TUI
- * can paint progress notifies. Sync version is kept for tests / callers
- * that need zero overhead on small corpora.
- */
+/** Share the corpus scan while letting the TUI paint progress between batches. */
 export async function buildProjectMemoryCorpusAsync(
   options: BuildCorpusOptions,
   onProgress?: (p: CorpusProgress) => void,
 ): Promise<ProjectCorpus> {
-  const agentDir = options.agentDir ?? getAgentDir();
-  const projectRoot = options.gitRoot || options.cwd;
-  const activeSessionFile = options.activeSessionFile
-    ? existsSync(options.activeSessionFile)
-      ? options.activeSessionFile
-      : undefined
-    : undefined;
+  const { corpus, files, agentDir, sessionsRoot, scopes } = prepareScan(options);
+  const paths = [...files];
+  const total = paths.length;
+  if (total > 0) onProgress?.({ scanned: 0, total, phase: "scanning" });
 
-  const corpus: ProjectCorpus = {
-    projectRoot,
-    sessionsConsidered: 0,
-    filesWithMarkers: 0,
-    observations: [],
-    reflections: [],
-    droppedIds: new Set<string>(),
-    knownSessionIds: new Set<string>(),
-    orphanedSessions: 0,
-  };
-
-  const candidateDirs = [
-    ...new Set([
-      encodeScopeDir(options.cwd),
-      ...(options.gitRoot && options.gitRoot !== options.cwd
-        ? [encodeScopeDir(options.gitRoot)]
-        : []),
-    ]),
-  ].map((scope) => join(agentDir, "sessions", scope));
-
-  // Enumerate candidates up-front so we can report the total.
-  const candidateFiles: string[] = [];
-  const seenFiles = new Set<string>();
-  for (const scopeDir of candidateDirs) {
-    let files: string[];
-    try {
-      if (!statSync(scopeDir).isDirectory()) continue;
-      files = readdirSync(scopeDir);
-    } catch {
-      continue;
-    }
-    for (const file of files) {
-      if (!file.endsWith(".jsonl")) continue;
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
-      const filePath = join(scopeDir, file);
-      if (activeSessionFile && filePath === activeSessionFile) continue;
-      candidateFiles.push(filePath);
-    }
-  }
-
-  const total = candidateFiles.length;
-  if (onProgress && total > 0) {
-    onProgress({ scanned: 0, total, phase: "scanning" });
-  }
-
-  let scanned = 0;
-  for (const filePath of candidateFiles) {
-    scanned++;
-    const file = filePath.slice(filePath.lastIndexOf("/") + 1);
-    corpus.sessionsConsidered++;
-    const header = parseSessionHeader(readFirstLine(filePath));
-    const sessionId = header?.id || file.slice(0, -6);
-    corpus.knownSessionIds.add(sessionId);
-
-    let raw: string;
-    try {
-      raw = readFileSync(filePath, "utf-8");
-    } catch {
-      if (scanned % YIELD_EVERY_FILES === 0) await yieldToEventLoop();
-      if (onProgress && scanned % 25 === 0) {
-        onProgress({ scanned, total, phase: "scanning" });
-      }
-      continue;
-    }
-    if (!raw.includes("om.")) {
-      if (scanned % YIELD_EVERY_FILES === 0) await yieldToEventLoop();
-      if (onProgress && scanned % 25 === 0) {
-        onProgress({ scanned, total, phase: "scanning" });
-      }
-      continue;
-    }
-    corpus.filesWithMarkers++;
-
-    const entries: Array<Record<string, unknown>> = [];
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        entries.push(JSON.parse(trimmed));
-      } catch {
-        /* corrupt lines silently dropped */
-      }
-    }
-    extractFromEntries(
-      entries,
-      sessionId,
-      corpus.observations,
-      corpus.reflections,
-      corpus.droppedIds,
-    );
-
+  for (const path of paths) {
+    scanSessionFile(corpus, path);
+    const scanned = corpus.sessionsConsidered;
     if (scanned % YIELD_EVERY_FILES === 0) await yieldToEventLoop();
-    if (onProgress && scanned % 25 === 0) {
-      onProgress({ scanned, total, phase: "scanning" });
-    }
+    if (scanned % 25 === 0) onProgress?.({ scanned, total, phase: "scanning" });
   }
-  if (onProgress && total > 0) {
-    onProgress({ scanned: total, total, phase: "scanning" });
+  if (total > 0) onProgress?.({ scanned: total, total, phase: "scanning" });
+
+  let pendingProcessed = 0;
+  for (const _ of scanPendingBuffers(corpus, agentDir, sessionsRoot, scopes)) {
+    pendingProcessed++;
+    if (pendingProcessed % YIELD_EVERY_FILES === 0) await yieldToEventLoop();
   }
-
-  // Phase 2b: pending buffers (global). Yields periodically.
-  const pendingDir = join(agentDir, PENDING_DIR);
-  if (existsSync(pendingDir)) {
-    let files: string[];
-    try {
-      files = readdirSync(pendingDir);
-    } catch {
-      files = [];
-    }
-    const mains = new Set<string>();
-    for (const file of files) {
-      if (file.endsWith(PENDING_SUFFIX)) {
-        mains.add(file.slice(0, -PENDING_SUFFIX.length));
-      }
-    }
-
-    let globalSessionIds: Set<string> | null = null;
-    const ensureGlobalIds = (): Set<string> => {
-      if (globalSessionIds) return globalSessionIds;
-      globalSessionIds = new Set<string>(corpus.knownSessionIds);
-      const sessionsRoot = join(agentDir, "sessions");
-      let scopes: string[];
-      try {
-        scopes = readdirSync(sessionsRoot);
-      } catch {
-        return globalSessionIds;
-      }
-      for (const scope of scopes) {
-        const scopePath = join(sessionsRoot, scope);
-        let st: ReturnType<typeof statSync> | null = null;
-        try {
-          st = statSync(scopePath);
-        } catch {
-          continue;
-        }
-        if (!st.isDirectory()) continue;
-        const isProjectScope =
-          scope === encodeScopeDir(options.cwd) ||
-          (options.gitRoot &&
-            options.gitRoot !== options.cwd &&
-            scope === encodeScopeDir(options.gitRoot));
-        if (isProjectScope) continue;
-        let scopeFiles: string[];
-        try {
-          scopeFiles = readdirSync(scopePath);
-        } catch {
-          continue;
-        }
-        for (const f of scopeFiles) {
-          if (!f.endsWith(".jsonl")) continue;
-          const header = parseSessionHeader(readFirstLine(join(scopePath, f)));
-          const sid =
-            header?.id || (f.includes("_") ? f.slice(f.lastIndexOf("_") + 1, -6) : f.slice(0, -6));
-          if (sid) globalSessionIds.add(sid);
-        }
-      }
-      return globalSessionIds;
-    };
-
-    let pendingProcessed = 0;
-    for (const file of files) {
-      const isMain = file.endsWith(PENDING_SUFFIX);
-      const isStale = file.endsWith(STALE_SUFFIX);
-      if (!isMain && !isStale) continue;
-      const sessionId = isMain
-        ? file.slice(0, -PENDING_SUFFIX.length)
-        : file.slice(0, -STALE_SUFFIX.length);
-      if (!sessionId) continue;
-      if (isStale && mains.has(sessionId)) continue;
-
-      let state: PendingState;
-      try {
-        state = JSON.parse(readFileSync(join(pendingDir, file), "utf-8"));
-      } catch {
-        continue;
-      }
-
-      const hasBatches =
-        (Array.isArray(state.observationBatches) && state.observationBatches.length > 0) ||
-        (Array.isArray(state.unanchoredBatches) && state.unanchoredBatches.length > 0) ||
-        (Array.isArray(state.reflectionBatches) && state.reflectionBatches.length > 0) ||
-        (Array.isArray(state.droppedBatches) && state.droppedBatches.length > 0) ||
-        (typeof (state as Record<string, unknown>).observation === "object" &&
-          (state as Record<string, unknown>).observation !== null) ||
-        (typeof (state as Record<string, unknown>).reflection === "object" &&
-          (state as Record<string, unknown>).reflection !== null) ||
-        (typeof (state as Record<string, unknown>).dropped === "object" &&
-          (state as Record<string, unknown>).dropped !== null);
-      if (!hasBatches) continue;
-
-      if (corpus.knownSessionIds.has(sessionId)) {
-        extractFromPendingState(
-          state,
-          sessionId,
-          "pending",
-          corpus.observations,
-          corpus.reflections,
-          corpus.droppedIds,
-        );
-      } else {
-        const gids = ensureGlobalIds();
-        if (gids.has(sessionId)) continue;
-        corpus.orphanedSessions++;
-        extractFromPendingState(
-          state,
-          sessionId,
-          "orphan",
-          corpus.observations,
-          corpus.reflections,
-          corpus.droppedIds,
-        );
-      }
-      pendingProcessed++;
-      if (pendingProcessed % 10 === 0) await yieldToEventLoop();
-    }
-  }
-
   return corpus;
 }

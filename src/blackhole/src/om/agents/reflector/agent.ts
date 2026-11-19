@@ -11,20 +11,9 @@
  * observer) so the stage can cool a deterministically broken model instead of
  * only debug-logging it.
  */
-import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { agentCompletionError, agentFailureStopReason } from "../completion.js";
-import { buildAgentContext } from "../agent-context.js";
-import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
-import {
-  createBridgeStreamFn,
-  createProviderFetch,
-  neverThrow,
-  type ProviderFetchOption,
-} from "../../provider-stream.js";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { runWorkerLoop, type WorkerLoopOptions } from "../worker-loop.js";
 import { hashId } from "../../ids.js";
-import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { RecordReflectionsSchema, type RecordReflectionsArgs } from "./tool-schema.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
@@ -38,54 +27,17 @@ import {
 import type { ReflectionCoverageTier } from "../dropper/coverage.js";
 import {
   isDeterministicError,
-  withDiscardedCount,
   WorkerStreamError,
   workerStreamErrorMessage,
 } from "../../retryable-error.js";
 
-interface RunReflectorArgs {
-  model: Model<any>;
-  apiKey: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
+interface RunReflectorArgs extends WorkerLoopOptions {
   reflections: Reflection[];
   observations: Observation[];
   /** Compact summary of existing reflections for context (not to re-process). */
   existingReflectionsSummary?: string;
   /** Compact summary of existing observations for context (not to re-process). */
   existingObservationsSummary?: string;
-  signal?: AbortSignal;
-  agentLoop?: typeof agentLoop;
-  /** Optional custom stream function bypassing agentLoop's default streamSimple.
-   *  Used by the Symbol.for bridge to access native pi-ai provider registrations
-   *  from jiti-loaded consolidation agents. */
-  streamFn?: (model: any, context: any, options: any) => any;
-  maxTurns?: number;
-  /**
-   * Generation cap wired by the consolidation stage from the effective window
-   * (`workerOutputAllowance`): the dispatched `maxTokens` must equal the output
-   * allowance the preflight reserved, or a fitting prompt still overflows at
-   * generation time. Absent, the legacy unclamped bound applies.
-   */
-  maxOutputTokens?: number;
-  thinkingLevel?: ModelThinkingLevel;
-  providerIdleTimeoutMs?: number;
-  /** Model registry for streamSimple resolution (custom providers, OAuth). */
-  modelRegistry?: any;
-  /**
-   * Pi session id, forwarded through standard stream options
-   * (`SimpleStreamOptions.sessionId`). agentLoop spreads the full config into
-   * stream opts, so the bridge can derive provider-required headers (e.g.
-   * OpenCode `x-opencode-session`) without per-provider branching upstream.
-   */
-  sessionId?: string;
-  /**
-   * Provider-neutral prompt-cache retention preference
-   * (`SimpleStreamOptions.cacheRetention`). Unset defers to pi's effective
-   * setting (provider default `short`); adapters ignore values they do not
-   * support.
-   */
-  cacheRetention?: CacheRetention;
 }
 
 function joinOrEmpty(items: string[]): string {
@@ -128,7 +80,7 @@ export interface ReflectorResult {
 }
 
 export async function runReflector(args: RunReflectorArgs): Promise<ReflectorResult> {
-  const { model, apiKey, headers, env, reflections, observations, signal } = args;
+  const { reflections, observations, signal } = args;
   if (observations.length === 0) return { reflections: undefined };
 
   const allowedObservationIds = observations.map((observation) => observation.id);
@@ -249,88 +201,10 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
     : "";
 
   const userText = `${existingReflectionsContext}${existingObservationsContext}NEW REFLECTIONS TO PROCESS:\n${joinOrEmpty(reflections.map(reflectionToSummaryLine))}\n\nNEW OBSERVATIONS TO PROCESS:\n${joinOrEmpty(observations.map(observationToSummaryLine))}\n\nCrystallize any missing durable facts or patterns into new reflections. Use complete=false for a partial batch or a correction, and use complete=true only on the final valid batch once every active observation has been reviewed. If nothing is stable enough, do not call the tool.`;
-  const prompts: Message[] = [
-    {
-      role: "user",
-      content: [{ type: "text", text: userText }],
-      timestamp: Date.now(),
-},
-  ];
-  const context = buildAgentContext(REFLECTOR_SYSTEM, [recordReflections]);
-  const reasoning = (model as { reasoning?: unknown }).reasoning;
-  const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  // Kept in scope past the config so the run can tell "the model stopped" from
-  // "the cap cut the model off".
-  const turnCap = effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : undefined;
-  const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  // The stage wires this from the effective window, but the option is only
-  // nullish-guarded by default: 0, NaN, and negatives would reach the
-  // provider verbatim (`maxTokens: 0` reads as empty success with coverage
-  // advanced on some providers). Validate at the boundary instead.
-  const maxOutputTokens =
-    typeof args.maxOutputTokens === "number" &&
-    Number.isFinite(args.maxOutputTokens) &&
-    args.maxOutputTokens > 0
-      ? // Floor first, clamp after: Math.floor(0.5) is 0, the very empty-cap
-        // case this guard prevents.
-        Math.max(1, Math.floor(args.maxOutputTokens))
-      : boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS);
-  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
-    model,
-    apiKey,
-    headers,
-    env,
-    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
-    ...(args.cacheRetention ? { cacheRetention: args.cacheRetention } : {}),
-    ...(providerFetch ? { fetch: providerFetch } : {}),
-    maxTokens: maxOutputTokens,
-    convertToLlm: (msgs) => msgs as Message[],
-    toolExecution: "sequential",
-    ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    ...(turnCap
-      ? { shouldStopAfterTurn: turnCap.shouldStopAfterTurn, finishTurn: turnCap.finishTurn }
-      : {}),
-  };
-
-  const loop = args.agentLoop ?? agentLoop;
-  // ── Bridge stream function ──
-  const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  // Never throws: pi's loop is fire-and-forget, so a sync throw or rejection
-  // here would become an unhandled rejection plus a run that hangs on an open
-  // event stream. Failures arrive as an error stream the completion check
-  // classifies like any provider error.
-  const streamFn = neverThrow(args.streamFn ?? bridgeStreamFn);
-  const stream = loop(prompts, context, config, signal, streamFn);
-  let agentError: string | undefined;
-  let failureKind: string | undefined;
-  try {
-    for await (const event of stream) {
-      // Tool execution collects records.
-      if (event.type === "agent_end") {
-        const msgs = ((event as any).messages || []) as Array<{
-          stopReason?: string;
-          errorMessage?: string;
-        }>;
-        // `length`/`aborted`/terminal `toolUse` are not completions either: a
-        // partial review reported as success would advance the reflector cursor
-        // over observations that were never crystallized. The complete=true
-        // close and a turn-cap end on a tool-work turn are the two sanctioned
-        // endings.
-        agentError = agentCompletionError(
-          msgs,
-          signal,
-          closedByCompleteBatch || turnCap?.exhausted,
-        );
-        failureKind = agentFailureStopReason(msgs);
-      }
-    }
-    await stream.result();
-  } catch (error) {
-    // A stream that breaks outright never emits agent_end, so the guard below
-    // never sees it — yet the run still holds everything recorded so far.
-    throw withDiscardedCount(error, accumulated.size);
-  }
+  const { agentError, failureKind, turnCapExhausted } = await runWorkerLoop(args, REFLECTOR_SYSTEM, recordReflections, userText, {
+    closedByCompleteBatch: () => closedByCompleteBatch,
+    recordedCount: () => accumulated.size,
+  });
 
   // The cap ended the run before the model closed the review. Throwing keeps
   // the cursor where it is; the message names no status code, because this is a
@@ -346,7 +220,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<ReflectorRes
   // `length` terminal carrying a deterministic (4xx) message keeps its
   // provider-error classification — the cap did not cause it.
   if (
-    turnCap?.exhausted &&
+    turnCapExhausted &&
     accumulated.size > 0 &&
     !closedByCompleteBatch &&
     !signal?.aborted &&

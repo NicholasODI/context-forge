@@ -953,7 +953,6 @@ export class ConfigManager<T extends object> {
     this.warnOnMalformedConfig(ctx, cwd, configDir);
     const scopes = this.getScopes();
     const sessionInitialized = this._ensureSession(ctx, cwd);
-    const sources = this.scopeSources(cwd, configDir);
     await openConfigFlow(
       {
         label: this.opts.label,
@@ -961,7 +960,6 @@ export class ConfigManager<T extends object> {
         cwd,
         scopes,
         sessionInitialized,
-        sessionNote: sources.find((s) => s.scope === "session")?.note ?? "",
         defaults: this.opts.defaults as Record<string, unknown>,
         env: this.opts.env as Record<string, string | EnvParser> | undefined,
         buildFields: (values) => {

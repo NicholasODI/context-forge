@@ -8,14 +8,13 @@
  * - 30s retry gate prevents repeated failed runs (isConsolidationRetryGated).
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createHash } from "node:crypto";
 import { anyStageDue, activePoolSignature, dropperPressureReached, matchesEmptyPressurePool,
  reflectionAccumulatedTokens, reflectionReviewSignature, reflectionAlreadyReviewed } from "./scheduling.js";
 export { anyStageDue, reflectionAccumulatedTokens, reflectionReviewSignature } from "./scheduling.js";
 
 import { matchesSkippedProvider } from "../core/provider-skip.js";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { type Config, type ConfiguredModel } from "./config.js";
+import type { ConfiguredModel } from "./config.js";
 import { debugLog, withDebugLogContext } from "./debug-log.js";
 import { type ResolveResult, type Runtime, type RuntimeGeneration } from "./runtime.js";
 import { withProviderAttributionHeaders } from "./provider-stream.js";

@@ -149,11 +149,6 @@ function makeSearchableEnumSubmenu(
       );
     }
 
-    function clampSelected(): void {
-      const items = filteredItems();
-      if (selected >= items.length) selected = Math.max(0, items.length - 1);
-    }
-
     const component: Component = {
       render(width: number): string[] {
         const lines: string[] = [];
