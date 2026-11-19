@@ -20,7 +20,7 @@ function attribution(record: MemoryRecord): string {
 }
 
 /** One renderer for live and persisted handoffs; state never authorizes work. */
-export function renderHandoff(state: ProjectMemory, freshness: Map<string, Freshness>, options: { budget: number; selected: MemoryRecord[] }) {
+export function renderHandoff(state: ProjectMemory, freshness: Map<string, Freshness>, options: { budget: number; selected: MemoryRecord[]; liveReminder?: boolean }) {
   const budget = options.budget;
   if (!Number.isInteger(budget) || budget < 3000 || budget > 8000) throw new RangeError("handoff body budget must be 3000–8000 characters");
   const task = state.task, f = freshness.get("task") ?? { status: "unverified", reason: "no trackable evidence recorded" };
@@ -33,6 +33,9 @@ export function renderHandoff(state: ProjectMemory, freshness: Map<string, Fresh
     `Revision ${state.revision}. Reference snapshot, not a new request or authorization.`,
     "Follow the latest user instruction. A generic continue does not authorize unrelated historical tasks.",
     "Goals in older append segments are historical. A shared project note may belong to another session."];
+  if (options.liveReminder) {
+    lines.splice(1, 0, "Context Forge automatically adds and refreshes this background reminder from saved project memory.");
+  }
   const reserve = 360; // Always retain diagnostics/retrieval footer.
   const add = (field: string, line: string) => {
     if (lines.join("\n").length + line.length + 1 + reserve > budget) { diagnostics.omitted.push({ field, reason: "budget" }); return false; }
@@ -44,7 +47,8 @@ export function renderHandoff(state: ProjectMemory, freshness: Map<string, Fresh
     // Essential fields go first, with fixed individual allocations. Optional
     // chronology cannot consume the space for uncertainty or the next action.
     add("state", `State: ${ambiguous ? "unresolved goal change" : active ? task.status : "inactive"}; saved status=${task.status}; evidence: ${f.status}.`);
-    add("objective", `${active && !ambiguous ? "Goal" : "Saved goal (not an active authorization)"}: ${snippet(task.text, 500)}`);
+    const goalLabel = options.liveReminder ? "Friendly reminder" : "Goal";
+    add("objective", `${active && !ambiguous ? goalLabel : "Saved goal (not an active authorization)"}: ${snippet(task.text, 500)}`);
     add("attribution", `Origin: ${attribution(task)}.`);
     add("freshness", `Evidence ${f.status}: ${snippet(f.reason, 220)}. ${f.status === "stale" ? "Recheck these referenced inputs before relying on old outcomes." : "Fresh fingerprints do not prove claims or expected test execution."}`);
     if (task.pendingGoalChange) add("ambiguity", `UNRESOLVED proposal (agent-recorded): ${snippet(task.pendingGoalChange.text, 180)}; source=${snippet(task.pendingGoalChange.source, 100)}. Do not infer acceptance.`);

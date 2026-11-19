@@ -463,5 +463,5 @@ export async function memoryView(root: string, state: ProjectMemory, options: { 
 }
 
 export function renderReminder(state: ProjectMemory, freshness: Map<string, Freshness>): string {
-  return renderHandoff(state, freshness, { budget: 8000, selected: reminderRecords(state) }).text;
+  return renderHandoff(state, freshness, { budget: 8000, selected: reminderRecords(state), liveReminder: true }).text;
 }

@@ -124,7 +124,7 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
       };
       if (input.action === "diagnostics") {
         const state = await readMemory(root) ?? emptyMemory();
-        const report = renderHandoff(state, await assessFreshness(root, state, reminderRecords(state)), { budget: 8000, selected: reminderRecords(state) });
+        const report = renderHandoff(state, await assessFreshness(root, state, reminderRecords(state)), { budget: 8000, selected: reminderRecords(state), liveReminder: true });
         const archived = await archive.read(root);
         return { content: [{ type: "text", text: JSON.stringify({ view: "planned current handoff, not provider-wire evidence", schemaVersion: state.version, revision: state.revision, diagnostics: report.diagnostics,
           archive: { sessions: archived.sessions, objects: archived.objects, records: archived.records.length, limited: archived.limited, warnings: archived.warnings, orientationBudget: 3000, freshness: "historical; not automatically reverified", sessionsCreatedAutomatically: false },
@@ -159,7 +159,7 @@ export function registerProjectMemory(pi: ExtensionAPI, enabled: (ctx: Extension
           const current = state ?? emptyMemory();
           const f = await assessFreshness(root, current, reminderRecords(current));
           const view = await archive.read(root);
-          ctx.ui.notify(JSON.stringify({ ...renderHandoff(current, f, { budget: 8000, selected: reminderRecords(current) }).diagnostics,
+          ctx.ui.notify(JSON.stringify({ ...renderHandoff(current, f, { budget: 8000, selected: reminderRecords(current), liveReminder: true }).diagnostics,
             archive: { sessions: view.sessions, records: view.records.length, limited: view.limited, warnings: view.warnings, orientationBudget: 3000 } }, null, 2), "info"); return;
         }
         const view = await archive.read(root);
