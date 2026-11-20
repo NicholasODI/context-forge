@@ -9,29 +9,17 @@
  * that a cadence run never re-evaluates. The same guard covers a run the agent
  * turn cap cut off.
  */
-import { agentLoop, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { CacheRetention, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { agentCompletionError, agentFailureStopReason } from "../completion.js";
-import { buildAgentContext } from "../agent-context.js";
-import { createTurnCap, type LegacyTurnCapOption } from "../turn-cap.js";
-import {
-  createBridgeStreamFn,
-  createProviderFetch,
-  neverThrow,
-  type ProviderFetchOption,
-} from "../../provider-stream.js";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { runWorkerLoop, type WorkerLoopOptions } from "../worker-loop.js";
 import { observationRenderedTokens } from "../../ledger/render-summary.js";
 import { dropTargetTokens, attachDropEvidence, type DropEvidence, type DropSelection } from "./selection.js";
 import { debugLog } from "../../debug-log.js";
 import {
   isDeterministicError,
-  withDiscardedCount,
   WorkerStreamError,
   WorkerProtocolError,
   workerStreamErrorMessage,
 } from "../../retryable-error.js";
-import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { type Observation, type Reflection } from "../../ledger/index.js";
 import {
   coverageTierForObservation,
@@ -43,11 +31,7 @@ import {
   summarizeCoverageByRelevanceForIds,
 } from "./coverage.js";
 
-interface RunDropperArgs {
-  model: Model<any>;
-  apiKey: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
+interface RunDropperArgs extends WorkerLoopOptions {
   reflections: Reflection[];
   observations: Observation[];
   /** Compact summary of existing active observations for context. */
@@ -70,38 +54,6 @@ interface RunDropperArgs {
    * and selects once globally. Unset for normal single runs.
    */
   rawProposals?: boolean;
-  /**
-   * Generation cap wired by the consolidation stage from the effective window
-   * (`workerOutputAllowance`): the dispatched `maxTokens` must equal the output
-   * allowance the preflight reserved, or a fitting prompt still overflows at
-   * generation time. Absent, the legacy unclamped bound applies.
-   */
-  maxOutputTokens?: number;
-  signal?: AbortSignal;
-  agentLoop?: typeof agentLoop;
-  /** Optional custom stream function bypassing agentLoop's default streamSimple.
-   *  Used by the Symbol.for bridge to access native pi-ai provider registrations
-   *  from jiti-loaded consolidation agents. */
-  streamFn?: (model: any, context: any, options: any) => any;
-  maxTurns?: number;
-  thinkingLevel?: ModelThinkingLevel;
-  providerIdleTimeoutMs?: number;
-  /** Model registry for streamSimple resolution (custom providers, OAuth). */
-  modelRegistry?: any;
-  /**
-   * Pi session id, forwarded through standard stream options
-   * (`SimpleStreamOptions.sessionId`). agentLoop spreads the full config into
-   * stream opts, so the bridge can derive provider-required headers (e.g.
-   * OpenCode `x-opencode-session`) without per-provider branching upstream.
-   */
-  sessionId?: string;
-  /**
-   * Provider-neutral prompt-cache retention preference
-   * (`SimpleStreamOptions.cacheRetention`). Unset defers to pi's effective
-   * setting (provider default `short`); adapters ignore values they do not
-   * support.
-   */
-  cacheRetention?: CacheRetention;
 }
 
 export {
@@ -162,10 +114,6 @@ export function normalizeDropObservationIds(
 
 export async function runDropper(args: RunDropperArgs): Promise<DropSelection | undefined> {
   const {
-    model,
-    apiKey,
-    headers,
-    env,
     reflections,
     observations,
     budgetTokens,
@@ -357,84 +305,11 @@ export async function runDropper(args: RunDropperArgs): Promise<DropSelection | 
     : "";
 
   const userText = `REPLACEMENT REFLECTIONS — these IDs are replacement values only, NEVER drop IDs:\n${joinOrEmpty(reflections.map(reflectionToDropperLine))}\n\n${existingObservationsContext}CANDIDATE OBSERVATIONS — only these IDs may be proposed for dropping (KEEP entries are protected/ineligible):\n${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById), reflections)))}\n\nObservation pool pressure: ~${observationTokens.toLocaleString()} tokens; target: ~${dropTargetTokens(budgetTokens, args.targetTokens).toLocaleString()} tokens; pool budget: ~${budgetTokens.toLocaleString()} tokens; fullness: ~${fullnessPercent.toLocaleString()}%.\nDrop urgency: ${urgency}.\nPool-wide maximum drops: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"} (advisory for this batch — the run may evaluate the pool in several batches and re-applies the cap globally over the merged proposals).\nThis maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
-  const prompts: Message[] = [
-    {
-      role: "user",
-      content: [{ type: "text", text: userText }],
-      timestamp: Date.now(),
-    },
-  ];
-  const context = buildAgentContext(DROPPER_SYSTEM, [dropObservations]);
-const reasoning = (model as { reasoning?: unknown }).reasoning;
-  const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : undefined;
-  // Kept in scope past the config so the run can tell "the model stopped" from
-  // "the cap cut the model off".
-  const turnCap = effectiveMaxTurns !== undefined ? createTurnCap(effectiveMaxTurns) : undefined;
-  const providerFetch = createProviderFetch(args.providerIdleTimeoutMs);
-  // The stage wires this from the effective window, but the option is only
-  // nullish-guarded by default: 0, NaN, and negatives would reach the
-  // provider verbatim (`maxTokens: 0` reads as empty success with coverage
-  // advanced on some providers). Validate at the boundary instead.
-  const maxOutputTokens =
-    typeof args.maxOutputTokens === "number" &&
-    Number.isFinite(args.maxOutputTokens) &&
-    args.maxOutputTokens > 0
-      ? // Floor first, clamp after: Math.floor(0.5) is 0, the very empty-cap
-        // case this guard prevents.
-        Math.max(1, Math.floor(args.maxOutputTokens))
-      : boundedMaxTokens(model, AGENT_LOOP_MAX_TOKENS);
-  const config: AgentLoopConfig & ProviderFetchOption & LegacyTurnCapOption = {
-    model,
-    apiKey,
-    headers,
-    env,
-    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
-    ...(args.cacheRetention ? { cacheRetention: args.cacheRetention } : {}),
-    ...(providerFetch ? { fetch: providerFetch } : {}),
-    maxTokens: maxOutputTokens,
-    convertToLlm: (msgs) => msgs as Message[],
-    toolExecution: "sequential",
-    ...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-    // Support both loop generations even when no turn cap is configured.
-    // Native hosts may not honor terminate on the tool result.
-    shouldStopAfterTurn: (ctx) =>
-      closedByCompleteBatch || protocolFailure !== undefined || (turnCap?.shouldStopAfterTurn(ctx) ?? false),
-    finishTurn: (ctx) =>
-      closedByCompleteBatch || protocolFailure !== undefined ? { action: "end" } : turnCap?.finishTurn(ctx),
-  };
-
-  const loop = args.agentLoop ?? agentLoop;
-  // ── Bridge stream function ──
-  const bridgeStreamFn = createBridgeStreamFn(streamSimple, args.modelRegistry);
-  // Never throws: pi's loop is fire-and-forget, so a sync throw or rejection
-  // here would become an unhandled rejection plus a run that hangs on an open
-  // event stream. Failures arrive as an error stream the completion check
-  // classifies like any provider error.
-  const streamFn = neverThrow(args.streamFn ?? bridgeStreamFn);
-  const stream = loop(prompts, context, config, signal, streamFn);
-  let agentError: string | undefined;
-  let failureKind: string | undefined;
-  try {
-    for await (const event of stream) {
-      // Tool execution collects candidate ids.
-      if (event.type === "agent_end") {
-        const msgs = ((event as any).messages || []) as Array<{
-          stopReason?: string;
-          errorMessage?: string;
-        }>;
-        // A validated explicit final batch may end on toolUse. Other terminal
-        // tool turns remain incomplete; error/length/abort still fail below.
-        agentError = agentCompletionError(msgs, signal, closedByCompleteBatch || turnCap?.exhausted);
-        failureKind = agentFailureStopReason(msgs);
-      }
-    }
-    await stream.result();
-  } catch (error) {
-    // A stream that breaks outright never emits agent_end, so the guard below
-    // never sees it — yet the run still holds every candidate proposed so far.
-    throw withDiscardedCount(error, proposedDropIds.length);
-  }
+  const { agentError, failureKind, turnCapExhausted } = await runWorkerLoop(args, DROPPER_SYSTEM, dropObservations, userText, {
+    closedByCompleteBatch: () => closedByCompleteBatch,
+    recordedCount: () => proposedDropIds.length,
+    shouldStop: () => closedByCompleteBatch || protocolFailure !== undefined,
+  });
 
   if (protocolFailure) throw protocolFailure;
 
@@ -451,7 +326,7 @@ const reasoning = (model as { reasoning?: unknown }).reasoning;
   // and a `length` terminal carrying a deterministic (4xx) message keeps its
   // provider-error classification — the cap did not cause it.
   if (
-    turnCap?.exhausted &&
+    turnCapExhausted &&
     !closedByCompleteBatch &&
     proposedDropIds.length > 0 &&
     !signal?.aborted &&

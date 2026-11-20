@@ -14,7 +14,6 @@ import { createConfirm } from "./confirm.ts";
 import { createScopeSelector, type ScopeSelectorResult } from "./scope-selector.ts";
 import { createSettingsModalBody } from "./body.ts";
 import type { SettingsModalBodyComponent } from "./types.ts";
-import { frame, frameContentWidth, responsiveInnerRows, DEFAULT_PADDING_X } from "./frame.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -24,7 +23,6 @@ export interface ConfigFlowParams {
   cwd: string;
   scopes: { global: boolean; project: boolean; session: boolean };
   sessionInitialized: boolean;
-  sessionNote: string;
   defaults: Record<string, unknown>;
   env?: Record<string, string | EnvParser>;
   buildFields: (values: Record<string, unknown>) => Field[];
@@ -260,7 +258,6 @@ async function openEditMode(params: ConfigFlowParams, scope: string): Promise<vo
   const scopeLabel = EDIT_MODE_TITLES[scope] ?? scope;
   const sources = params.scopeSources();
   const sourceEntry = sources.find((s) => s.scope === scope);
-  const subtitle = scope === "session" ? params.sessionNote : (sourceEntry?.note ?? "");
   // Path note for edit mode: static label for env/defaults, resolved
   // path (or pending note) for file-based scopes.
   const editPathNote =
@@ -509,7 +506,6 @@ async function openDisplayAll(params: ConfigFlowParams): Promise<void> {
   }
   tabDefs.push({ id: "defaults", scope: "defaults", label: "Defaults" });
 
-  const subtitle = sources.map((s) => `${s.label}: ${s.note}`).join("\n");
 
   // Per-tab path/location notes rendered under the subtitle.
   const tabPathNotes: Record<string, string> = {};

@@ -1,7 +1,5 @@
 /**
- * `SettingsModalBody` — the renderable+inputtable component that
- * `createSettingsModal` and `openSettingsModal` mount inside an
- * overlay. Owns:
+ * `SettingsModalBody` renders and handles input inside the settings overlay. Owns:
  *
  *   - Tab strip across the top (when `tabs` is non-empty).
  *   - Optional fuzzy search bar (when `enableSearch` is true).
@@ -19,31 +17,22 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
   matchesKey,
-  truncateToWidth,
-  visibleWidth,
   type Component,
   type TUI,
-  fuzzyMatch,
 } from "@earendil-works/pi-tui";
-import { validateFieldValue } from "./validate-field.ts";
 import type {
   Field,
-  FieldKeyHint,
   FieldRenderContext,
   SettingsModalOptions,
   SettingsModalBodyComponent,
   Tab,
-  VisibilityContext,
 } from "./types";
 import { RENDERERS } from "./fields/index";
 import {
-  divider,
-  formatHintLine,
   frame,
   frameContentWidth,
   pad,
   responsiveInnerRows,
-  wrapLine,
   type FrameOptions,
   DEFAULT_PADDING_X,
 } from "./frame";
@@ -53,20 +42,11 @@ import {
   totalVisibleItems,
   updateVisibleIndices,
   visibleRowIndices,
-  clampSelection,
   focusedIndex,
   focusedRow,
 } from "./navigation.ts";
 import { buildVisibilityContext, isDirty, commitValue, allValues } from "./values.ts";
-import {
-  renderTabBar,
-  renderSearchBar,
-  renderFooter,
-  renderRow,
-  renderBody,
-  renderFieldDesc,
-  estimateDescriptionRows,
-} from "./render.ts";
+import { renderFooter, renderBody } from "./render.ts";
 import { createConfirm } from "./confirm.ts";
 
 const PREFERRED_INNER_ROWS = 45;
@@ -109,9 +89,7 @@ export interface BodyState {
 }
 
 /**
- * Build the body component. The factory is independent of overlay
- * lifecycle — `createSettingsModal` (in modal.ts) wraps it for the
- * `ctx.ui.custom` shape; advanced callers can mount the body directly.
+ * Build the settings body. The config flow owns the overlay lifecycle.
  */
 export function createSettingsModalBody<F extends Field>(
   options: SettingsModalOptions<F>,

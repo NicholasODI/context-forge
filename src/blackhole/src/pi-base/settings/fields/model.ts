@@ -29,7 +29,6 @@ import {
   matchesKey,
   SelectList,
   truncateToWidth,
-  type Component,
   type SelectItem,
 } from "@earendil-works/pi-tui";
 import { formatHintLine, type KeyHint } from "../frame";

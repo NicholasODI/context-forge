@@ -14,7 +14,7 @@
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { Component, KeybindingsManager, OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 
 // ─────────────────────────────────────────────────────────────────────
 // Visibility context for visibleWhen
@@ -415,8 +415,6 @@ export interface SettingsModalOptions<F extends Field = Field> {
   searchPlaceholder?: string;
   /** Theme overrides (mostly used for callers with fixed-palette aesthetics). */
   theme?: SettingsTheme;
-  /** Override the overlay positioning (defaults: anchor center, 92% × 85%). */
-  overlayOptions?: OverlayOptions | (() => OverlayOptions);
   /**
    * Called whenever a field's value changes. The modal calls this
    * synchronously after updating its own row state, so any throw here
@@ -501,24 +499,11 @@ export interface SettingsModalOptions<F extends Field = Field> {
    * is a no-op. Rows render normally.
    */
   readOnly?: boolean;
-  /**
-   * Called once when the modal closes. Useful for fire-and-forget
-   * cleanup (e.g. saving a debounced config).
-   */
-  onClose?: () => void;
 }
 
 /** Value type of the field with key `K` inside a union `F`. */
 export type ValueOfField<F extends Field, K extends string> =
   Extract<F, { key: K }> extends { value: infer V } ? V : never;
-
-/** Component factory shape required by `ctx.ui.custom`. */
-export type SettingsModalFactory<T = void> = (
-  tui: TUI,
-  theme: Theme,
-  keybindings: KeybindingsManager,
-  done: (result: T) => void,
-) => Component;
 
 /**
  * Return type of `createSettingsModalBody`.
