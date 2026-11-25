@@ -16,10 +16,11 @@
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
+  getTerminalRows,
   matchesKey,
   type Component,
   type TUI,
-} from "@earendil-works/pi-tui";
+} from "../../../../tui-compat.ts";
 import type {
   Field,
   FieldRenderContext,
@@ -678,7 +679,7 @@ export function createSettingsModalBody<F extends Field>(
   return {
     render(width: number): string[] {
       const inner = responsiveInnerRows(
-        state.args.tui.terminal.rows ?? 24,
+        getTerminalRows(state.args.tui, 24),
         PREFERRED_INNER_ROWS,
         14,
       );

@@ -11,12 +11,8 @@
  *    are untouched. The copy only fills screen space the rebuild dropped.
  *  - Bounded: a fixed cap keeps the added disk/redraw cost per compaction small.
  */
-import { Container, Markdown, Text, stripTerminalSequences } from "@earendil-works/pi-tui";
-import {
-  getMarkdownTheme,
-  type ExtensionAPI,
-  type SessionEntry,
-} from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Text, stripTerminalSequences } from "../../../tui-compat.ts";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { debugLog } from "../om/debug-log.js";
 import type { Runtime } from "../om/runtime.js";
 
@@ -187,7 +183,7 @@ export function registerPreCompactionOutput(pi: ExtensionAPI, runtime: Runtime):
       container.addChild(new Text(theme.fg("dim", "[Previous output — display only]"), 0, 0));
       // Copied text is data, never terminal control: strip escape sequences
       // before the Markdown component can pass them to the terminal.
-      container.addChild(new Markdown(stripTerminalSequences(data.text), 0, 0, getMarkdownTheme()));
+      container.addChild(new Markdown(stripTerminalSequences(data.text), 0, 0));
       if (data.truncated) {
         container.addChild(new Text(theme.fg("dim", "[Copy truncated]"), 0, 0));
       }

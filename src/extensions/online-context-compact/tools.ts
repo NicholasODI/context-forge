@@ -4,7 +4,7 @@
  */
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text } from "../../tui-compat.ts";
 import { Type } from "typebox";
 import { renderSolPiTool } from "../../tui.ts";
 import { PLAN_STATUSES, type PlanStep } from "./plan.ts";

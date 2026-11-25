@@ -1,5 +1,4 @@
-import type { Component, TUI } from "@earendil-works/pi-tui";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, type Component, type TUI } from "../../../../tui-compat.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { formatHintLine, wrapLine, type KeyHint } from "./frame.ts";
 

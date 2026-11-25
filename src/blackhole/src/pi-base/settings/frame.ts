@@ -28,7 +28,7 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../../../../tui-compat.ts";
 
 /** Default horizontal padding inside the frame, in columns. */
 export const DEFAULT_PADDING_X = 1;

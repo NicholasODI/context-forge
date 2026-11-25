@@ -1,5 +1,5 @@
 import type { SectionData } from "../sections";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi } from "../../../tui-compat.ts";
 
 const section = (title: string, items: string[]): string => {
   if (items.length === 0) return "";

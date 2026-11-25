@@ -24,7 +24,7 @@
  * input would be the wrong kind of input to this editor anyway.
  */
 
-import { matchesKey, decodeKittyPrintable } from "@earendil-works/pi-tui";
+import { matchesKey, decodeKittyPrintable } from "../../../../tui-compat.ts";
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 

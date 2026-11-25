@@ -1,6 +1,6 @@
 import type { BodyState, InternalRow } from "./body.ts";
 import type { Field, FieldKeyHint, FieldRenderContext } from "./types.ts";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "../../../../tui-compat.ts";
 import { divider, formatHintLine, pad, wrapLine } from "./frame.ts";
 import { validateFieldValue } from "./validate-field.ts";
 import { visibleRowIndices, clampSelection, focusedRow } from "./navigation.ts";

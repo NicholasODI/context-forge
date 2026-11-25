@@ -21,13 +21,13 @@
  */
 
 import {
+  createSelectListTheme,
   matchesKey,
+  SelectList,
   truncateToWidth,
   type Component,
   type SelectItem,
-} from "@earendil-works/pi-tui";
-import { SelectList } from "@earendil-works/pi-tui";
-import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
+} from "../../../../../tui-compat.ts";
 import { handleInlineEditInput, renderInlineEditValue, type InlineEditState } from "../inline-edit";
 import { formatHintLine } from "../frame";
 import type {
@@ -264,7 +264,7 @@ function makeNumberValuesSubmenu(
         label: `${idx + 1}. ${v}${activeSuffix}`,
       };
     });
-    const list = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+    const list = new SelectList(items, Math.min(items.length, 12), createSelectListTheme(ctx.theme));
     const idx = items.findIndex((i) => Number(i.value) === current);
     list.setSelectedIndex(idx >= 0 ? idx : 0);
     list.onSelect = (item) => done(Number(item.value));

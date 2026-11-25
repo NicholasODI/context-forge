@@ -3,7 +3,7 @@
  * `on` and `off`; the value is committed immediately.
  */
 
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey } from "../../../../../tui-compat.ts";
 import type { BooleanField, FieldRenderer } from "../types";
 
 export const booleanRenderer: FieldRenderer<BooleanField, boolean> = {

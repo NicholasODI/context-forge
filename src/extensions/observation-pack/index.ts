@@ -19,7 +19,7 @@
 
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text } from "../../tui-compat.ts";
 import { Type } from "typebox";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsCount, renderSolPiTool, showSolPiSavings } from "../../tui.ts";

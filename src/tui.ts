@@ -4,7 +4,7 @@
  */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Text } from "./tui-compat.ts";
 
 export type SolPiTuiMechanism =
 	| "Action Fusion"

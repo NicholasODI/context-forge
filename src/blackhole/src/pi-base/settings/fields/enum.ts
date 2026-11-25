@@ -6,14 +6,14 @@
  * don't have to mash Enter to scroll through 20+ entries.
  */
 
-import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import {
+  createSelectListTheme,
   matchesKey,
   SelectList,
   truncateToWidth,
   type Component,
   type SelectItem,
-} from "@earendil-works/pi-tui";
+} from "../../../../../tui-compat.ts";
 import { formatHintLine } from "../frame";
 import { deleteWordBackward } from "../inline-edit";
 import type { EnumField, FieldRenderContext, FieldRenderer, SubmenuFactory } from "../types";
@@ -61,7 +61,7 @@ function makeEnumSubmenu(
     const list = new SelectList(
       items,
       Math.min(items.length, MAX_VISIBLE_ROWS),
-      getSelectListTheme(),
+      createSelectListTheme(ctx.theme),
     );
     const idx = field.options.indexOf(current);
     list.setSelectedIndex(idx >= 0 ? idx : 0);

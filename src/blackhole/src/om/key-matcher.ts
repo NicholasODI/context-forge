@@ -9,4 +9,4 @@
  * local copy (see git history for the original implementation).
  */
 
-export { visibleWidth } from "@earendil-works/pi-tui";
+export { visibleWidth } from "../../../tui-compat.ts";

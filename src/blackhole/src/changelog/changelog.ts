@@ -9,8 +9,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Component, TUI } from "@earendil-works/pi-tui";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { getTerminalRows, matchesKey, type Component, type TUI } from "../../../tui-compat.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -357,7 +356,7 @@ export function createChangelogViewer(args: ChangelogViewerArgs): Component {
   const PAGE = 5;
 
   const render = (width: number): string[] => {
-    const inner = responsiveInnerRows(tui.terminal.rows ?? 24, PREFERRED_INNER_ROWS, 14);
+    const inner = responsiveInnerRows(getTerminalRows(tui, 24), PREFERRED_INNER_ROWS, 14);
     const cw = frameContentWidth(width);
     // Wrap static lines to current width
     const wrapped: string[] = [];
@@ -390,7 +389,7 @@ export function createChangelogViewer(args: ChangelogViewerArgs): Component {
   };
 
   const handleInput = (data: string): void => {
-    const inner = responsiveInnerRows(tui.terminal.rows ?? 24, PREFERRED_INNER_ROWS, 14);
+    const inner = responsiveInnerRows(getTerminalRows(tui, 24), PREFERRED_INNER_ROWS, 14);
     const cw = frameContentWidth(80); // temp; actual wrapped length uses cw=?
     // Recompute wrapped length for bounds
     const wrapped: string[] = [];
@@ -446,7 +445,7 @@ function createLazyChangelogViewer(params: {
   }
 
   const render = (width: number): string[] => {
-    const inner = responsiveInnerRows(tui.terminal.rows ?? 24, PREFERRED_INNER_ROWS, 14);
+    const inner = responsiveInnerRows(getTerminalRows(tui, 24), PREFERRED_INNER_ROWS, 14);
     const wrapped = getWrapped(width);
     const visible = Math.max(1, inner - 3); // reserve footer + blank
     const maxScroll = Math.max(0, wrapped.length - visible);
@@ -466,7 +465,7 @@ function createLazyChangelogViewer(params: {
   };
 
   const handleInput = (data: string): void => {
-    const inner = responsiveInnerRows(tui.terminal.rows ?? 24, PREFERRED_INNER_ROWS, 14);
+    const inner = responsiveInnerRows(getTerminalRows(tui, 24), PREFERRED_INNER_ROWS, 14);
     const wrapped = getWrapped(lastWidth);
     const visible = Math.max(1, inner - 3);
     const maxScroll = Math.max(0, wrapped.length - visible);

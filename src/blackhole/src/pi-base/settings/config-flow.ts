@@ -9,7 +9,7 @@
  */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import type { Component, OverlayOptions, TUI } from "../../../../tui-compat.ts";
 import { createConfirm } from "./confirm.ts";
 import { createScopeSelector, type ScopeSelectorResult } from "./scope-selector.ts";
 import { createSettingsModalBody } from "./body.ts";

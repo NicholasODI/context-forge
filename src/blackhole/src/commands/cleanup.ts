@@ -15,7 +15,7 @@
  * notification. Use TUI mode to actually delete.
  */
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, decodeKittyPrintable } from "@earendil-works/pi-tui";
+import { matchesKey, decodeKittyPrintable } from "../../../tui-compat.ts";
 import { visibleWidth } from "../om/key-matcher.ts";
 import {
   analyzeOrphaned,

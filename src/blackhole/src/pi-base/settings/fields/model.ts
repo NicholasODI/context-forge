@@ -23,14 +23,14 @@
  * — no second-class colour scheme inside submenus.
  */
 
-import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import {
+  createSelectListTheme,
   matchesKey,
   SelectList,
   truncateToWidth,
   type SelectItem,
-} from "@earendil-works/pi-tui";
+} from "../../../../../tui-compat.ts";
 import { formatHintLine, type KeyHint } from "../frame";
 import { handleInlineEditInput, type InlineEditState } from "../inline-edit";
 import type {
@@ -216,7 +216,7 @@ function makeSubmenu(
       list = new SelectList(
         items,
         Math.min(Math.max(items.length, 1), MAX_VISIBLE_MODELS),
-        getSelectListTheme(),
+        createSelectListTheme(ctx.theme),
       );
       const idx =
         preserveValue !== undefined ? items.findIndex((i) => i.value === preserveValue) : -1;

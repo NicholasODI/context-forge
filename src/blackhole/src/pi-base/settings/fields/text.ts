@@ -8,10 +8,14 @@
  *   the Editor directly.
  */
 
-import { Editor, type Component, matchesKey } from "@earendil-works/pi-tui";
-import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import type { EditorTheme } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  createSelectListTheme,
+  Editor,
+  matchesKey,
+  truncateToWidth,
+  type Component,
+  type EditorTheme,
+} from "../../../../../tui-compat.ts";
 import type {
   FieldRenderer,
   SubmenuFactory,
@@ -60,7 +64,7 @@ function makeTextSubmenu(current: string, ctx: FieldRenderContext): SubmenuFacto
       ctx.tui,
       {
         borderColor: (s: string) => ctx.theme.fg("muted", s),
-        selectList: getSelectListTheme(),
+        selectList: createSelectListTheme(ctx.theme),
       } as EditorTheme,
       {
         paddingX: 0,
