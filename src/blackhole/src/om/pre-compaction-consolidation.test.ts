@@ -12,6 +12,8 @@ import {
   triggerConsolidation,
 } from "./consolidation.ts";
 import { registerCompactionTrigger } from "./compaction-trigger.ts";
+import { runPreCompactionConsolidationWithUI } from "./pre-compact-overlay.ts";
+import { registerMemoryCommand } from "../commands/memory.ts";
 import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION } from "../hooks/before-compact.ts";
 import type { ConsolidateBeforeCompactionMode } from "../core/unified-config.ts";
 import {
@@ -345,7 +347,7 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     expect(h.modelsUsed.some((m) => m.stage === "dropper")).toBe(true);
   });
 
-  it("pre-compaction consolidation drains all remaining chunks across an unrenderable leading entry before unblocking requests", async () => {
+  it("pre-compaction consolidation drains all remaining chunks across an unrenderable leading entry before compaction runs", async () => {
     const h = makeHarness({
       consolidateBeforeCompaction: "only",
       consolidatorModel: {
@@ -383,7 +385,15 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
       consolidateBeforeCompaction: "only",
     });
     h.ctx.isIdle = () => true;
-    h.ctx.compact = vi.fn();
+    let compactResolved!: () => void;
+    const compactDone = new Promise<void>((resolve) => {
+      compactResolved = resolve;
+    });
+    const compactCalls: number[] = [];
+    h.ctx.compact = vi.fn(() => {
+      compactCalls.push(remainingUnobservedTokens(h.entries, h.runtime));
+      compactResolved();
+    });
 
     let releaseLastChunk!: () => void;
     const lastChunkGate = new Promise<void>((resolve) => {
@@ -454,31 +464,18 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     });
     registerCompactionTrigger(h.pi, h.runtime);
 
-    let agentEndDone = false;
-    const agentEndP = Promise.resolve(handlers.agent_end?.({ messages: [] }, h.ctx)).then(() => {
-      agentEndDone = true;
-    });
+    // agent_end returns synchronously (never blocks OMP's 30s agent_end handler timeout)
+    handlers.agent_end?.({ messages: [] }, h.ctx);
 
-    // Wait until chunks 1..7 have processed and chunk 8 is gated
+    // Wait until chunks 1..7 have processed and chunk 8 is gated; compact() must not fire yet
     await new Promise((r) => setTimeout(r, 40));
-    expect(agentEndDone).toBe(false);
     expect(observedIds).toContain("pre-8");
-
-    // Request gate stays blocked until chunk 8 + Reflector + Dropper complete
-    let nextRequestUnblocked = false;
-    const nextRequestP = Promise.resolve(
-      handlers.before_provider_request?.({ payload: {} }, h.ctx),
-    ).then(() => {
-      nextRequestUnblocked = true;
-    });
-    await new Promise((r) => setTimeout(r, 15));
-    expect(nextRequestUnblocked).toBe(false);
+    expect(h.ctx.compact).not.toHaveBeenCalled();
 
     releaseLastChunk();
-    await Promise.all([agentEndP, nextRequestP]);
+    await compactDone;
 
-    expect(agentEndDone).toBe(true);
-    expect(nextRequestUnblocked).toBe(true);
+    expect(compactCalls).toEqual([0]);
     expect(observedIds).toEqual(Array.from({ length: 8 }, (_, i) => `pre-${i + 1}`));
     expect(remainingUnobservedTokens(h.entries, h.runtime)).toBe(0);
     expect(h.runtime.getCursor("observer")?.entryId).toBe("pre-8");
@@ -593,7 +590,7 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     expect(omDetails?.observations?.length).toBe(1);
   });
 
-  it("blocks agent_end, before_agent_start, and before_provider_request synchronously until pre-compaction consolidation finishes", async () => {
+  it("mounts an interactive progress overlay in session_before_compact so OMP pauses its 30s handler timeout, and skips overlay when already consolidated", async () => {
     const h = makeHarness({
       consolidateBeforeCompaction: "only",
       consolidatorModel: {
@@ -601,130 +598,145 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
         id: consolidatorModel.id,
       },
     });
-    h.runtime.applyLoadedConfig({
-      ...h.runtime.config,
-      compactAfterTokens: 1, // trigger immediately on agent_end
-      midRunCompaction: "off",
-      consolidateBeforeCompaction: "only",
-    });
 
-    const workingMessages: Array<string | undefined> = [];
+    let renderedLines: string[] = [];
+    let overlayMounted = 0;
+    const mockTheme = {
+      fg: (_token: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const mockTui = { requestRender: vi.fn() };
     h.ctx.hasUI = true;
     h.ctx.ui = {
       notify: vi.fn(),
-      setWorkingMessage: vi.fn((msg?: string) => workingMessages.push(msg)),
-    };
-    h.ctx.isIdle = () => true;
-    const compactCalls: number[] = [];
-    h.ctx.compact = vi.fn(() => {
-      compactCalls.push(h.modelsUsed.length);
-    });
-
-    // Gate the observer stream so we can prove agent_end + request hooks stay blocked while it runs
-    let releaseObserver!: () => void;
-    const observerGate = new Promise<void>((resolve) => {
-      releaseObserver = resolve;
-    });
-    const baseStream = h.ctx.modelRegistry.streamSimple;
-    h.ctx.modelRegistry.streamSimple = vi.fn((calledModel: any, context: any) => {
-      if (h.runtime.consolidationPhase === "observer") {
-        const stream = createAssistantMessageEventStream();
-        void observerGate.then(() => {
-          const message = {
-            role: "assistant",
-            content: [
-              {
-                type: "toolCall",
-                id: "call-obs",
-                name: "record_observations",
-                arguments: {
-                  complete: true,
-                  observations: [
-                    {
-                      content: "Exponential backoff bug in src/client.ts line 42 was fixed with jitter preserved",
-                      relevance: "medium",
-                      sourceEntryIds: ["e1", "e2", "e3", "e4"],
-                    },
-                    {
-                      content: "Unit tests for src/client.ts backoff behavior now pass after the jitter fix",
-                      relevance: "low",
-                      sourceEntryIds: ["e4"],
-                    },
-                  ],
-                },
-              },
-            ],
-            api: calledModel.api,
-            provider: calledModel.provider,
-            model: calledModel.id,
-            usage,
-            timestamp: Date.now(),
-            stopReason: "toolUse",
-          } as any;
-          h.modelsUsed.push({
-            stage: "observer",
-            model: `${calledModel.provider}/${calledModel.id}`,
-          });
-          stream.push({ type: "done", reason: "toolUse", message });
-          stream.end(message);
+      setWorkingMessage: vi.fn(),
+      custom: vi.fn(async (factory: any) => {
+        overlayMounted += 1;
+        return await new Promise((resolve) => {
+          const component = factory(mockTui, mockTheme, {}, resolve);
+          // Factory must return component synchronously so OMP pauses timeoutBudget immediately
+          expect(typeof component.render).toBe("function");
+          renderedLines = component.render(76);
         });
-        return stream;
-      }
-      return baseStream(calledModel, context);
+      }),
+    };
+
+    let beforeCompactHandler: ((event: any, ctx: any) => Promise<any>) | undefined;
+    h.pi.on.mockImplementation((eventName: string, fn: any) => {
+      if (eventName === "session_before_compact") beforeCompactHandler = fn;
     });
+    registerBeforeCompactHook(h.pi, h.runtime);
 
-    const handlers: Record<string, (event: any, ctx: any) => Promise<void> | void> = {};
-    h.pi.on.mockImplementation((name: string, fn: any) => {
-      handlers[name] = fn;
-    });
-    registerCompactionTrigger(h.pi, h.runtime);
-
-    let agentEndSettled = false;
-    const agentEndPromise = Promise.resolve(
-      handlers.agent_end?.({ messages: [] }, h.ctx),
-    ).then(() => {
-      agentEndSettled = true;
-    });
-
-    // Give microtasks a chance to enter observer stage
-    await new Promise((r) => setTimeout(r, 20));
-    expect(agentEndSettled).toBe(false);
-    expect(h.runtime.preCompactionConsolidationPromise).not.toBeNull();
-    expect(workingMessages[0]).toContain("Consolidating memory before compaction");
-
-    // Outgoing request hooks must also block while pre-compaction consolidation is running
-    let beforeAgentSettled = false;
-    let beforeProviderSettled = false;
-    const beforeAgentPromise = Promise.resolve(handlers.before_agent_start?.({}, h.ctx)).then(
-      () => {
-        beforeAgentSettled = true;
+    const snapshotBefore = [...h.entries];
+    const result = await beforeCompactHandler!(
+      {
+        preparation: {
+          firstKeptEntryId: "e3",
+          tokensBefore: 1200,
+          fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+        },
+        branchEntries: snapshotBefore,
+        customInstructions: PI_VCC_COMPACT_INSTRUCTION,
       },
+      h.ctx,
     );
-    const beforeProviderPromise = Promise.resolve(
-      handlers.before_provider_request?.({ payload: {} }, h.ctx),
-    ).then(() => {
-      beforeProviderSettled = true;
+
+    expect(overlayMounted).toBe(1);
+    expect(renderedLines.join("\n")).toContain("Consolidating Before Compaction");
+    expect(renderedLines.join("\n")).toContain("consolidator-provider/fast-consolidator");
+    expect(result?.compaction).toBeDefined();
+    expect(h.modelsUsed.map((m) => m.stage)).toEqual(["observer", "reflector", "dropper"]);
+    expect(remainingUnobservedTokens(h.entries, h.runtime)).toBe(0);
+
+    // Calling again for the same already-consolidated tip must NOT flash the overlay
+    const second = await runPreCompactionConsolidationWithUI(h.pi, h.runtime, h.ctx);
+    expect(second).toEqual({ outcome: "skipped", reason: "already_consolidated" });
+    expect(overlayMounted).toBe(1);
+  });
+
+  it("allows pressing Esc in the pre-compaction progress overlay to skip remaining consolidation cleanly", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    // Never-resolving observer stream so we can verify Esc cancels immediately
+    h.ctx.modelRegistry.streamSimple = vi.fn(() => createAssistantMessageEventStream());
+    const mockTheme = { fg: (_t: string, s: string) => s, bold: (s: string) => s };
+    h.ctx.hasUI = true;
+    h.ctx.ui = {
+      notify: vi.fn(),
+      setWorkingMessage: vi.fn(),
+      custom: vi.fn(async (factory: any) => {
+        return await new Promise((resolve) => {
+          const component = factory({ requestRender: vi.fn() }, mockTheme, {}, resolve);
+          setTimeout(() => component.handleInput("\x1b"), 15);
+        });
+      }),
+    };
+
+    const res = await runPreCompactionConsolidationWithUI(h.pi, h.runtime, h.ctx);
+    expect(res).toEqual({ outcome: "skipped", reason: "aborted" });
+  });
+
+  it("gives observationalMemory on/off highest priority and clearly lists it OFF in /blackhole-memory", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: { provider: "llama.cpp", id: "consolidator-qwen3.8-27b" },
+    });
+    h.runtime.setForgeOverrides({
+      consolidatorModel: { provider: "llama.cpp", id: "consolidator-qwen3.8-27b" },
+      consolidateBeforeCompaction: "only",
+      observationalMemoryEnabled: false,
+    });
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      memory: true,
+      consolidateBeforeCompaction: "only",
     });
 
-    await new Promise((r) => setTimeout(r, 10));
-    expect(beforeAgentSettled).toBe(false);
-    expect(beforeProviderSettled).toBe(false);
-    expect(h.ctx.compact).not.toHaveBeenCalled();
+    expect(h.runtime.config.memory).toBe(false);
+    expect(h.runtime.config.consolidateBeforeCompaction).toBe("off");
+    expect(h.runtime.observationalMemoryDisabledByForge).toBe(true);
 
-    // Release observer — full Observer → Reflector → Dropper completes before agent_end / hooks resolve
-    releaseObserver();
-    await Promise.all([agentEndPromise, beforeAgentPromise, beforeProviderPromise]);
+    // Pre-compaction consolidation skips because OM is OFF
+    const pre = await consolidateBeforeCompaction(h.pi, h.runtime, h.ctx);
+    expect(pre.outcome).toBe("skipped");
+    expect(h.streamSimple).not.toHaveBeenCalled();
 
-    expect(agentEndSettled).toBe(true);
-    expect(beforeAgentSettled).toBe(true);
-    expect(beforeProviderSettled).toBe(true);
-    expect(h.runtime.preCompactionConsolidationPromise).toBeNull();
-    expect(h.modelsUsed.map((m) => m.stage)).toEqual(["observer", "reflector", "dropper"]);
-    expect(workingMessages.at(-1)).toBeUndefined();
+    // /blackhole-memory status explicitly displays OM status OFF and why
+    let statusHandler: ((args: any, ctx: any) => Promise<void>) | undefined;
+    const cmdPi: any = {
+      registerCommand: (_name: string, def: any) => {
+        statusHandler = def.handler;
+      },
+    };
+    registerMemoryCommand(cmdPi, h.runtime);
+    await statusHandler!("status", h.ctx);
+    const statusText = h.ctx.ui.notify.mock.calls.at(-1)[0] as string;
+    expect(statusText).toContain("OM status:      OFF (disabled by observationalMemory: false in context-forge.json)");
+    expect(statusText).toContain("Pre-compact OM: OFF (observational memory is OFF)");
 
-    // Let deferred idle-wait microtask invoke ctx.compact() and confirm consolidation was already done
-    await new Promise((r) => setTimeout(r, 25));
-    expect(compactCalls).toEqual([3]);
+    // Also verify memory: false in blackhole settings takes highest priority when forge OM is ON
+    h.runtime.setForgeOverrides({
+      consolidatorModel: { provider: "llama.cpp", id: "consolidator-qwen3.8-27b" },
+      consolidateBeforeCompaction: "only",
+      observationalMemoryEnabled: true,
+    });
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      memory: false,
+      consolidateBeforeCompaction: "only",
+    });
+    expect(h.runtime.config.memory).toBe(false);
+    expect(h.runtime.config.consolidateBeforeCompaction).toBe("off");
+    expect(h.runtime.observationalMemoryDisabledByForge).toBe(false);
+    await statusHandler!("status", h.ctx);
+    const bhOffText = h.ctx.ui.notify.mock.calls.at(-1)[0] as string;
+    expect(bhOffText).toContain("OM status:      OFF (disabled by memory: false in blackhole settings)");
+    expect(bhOffText).toContain("Pre-compact OM: OFF (observational memory is OFF)");
   });
 
   it("preserves forge consolidator model overrides across applyLoadedConfig reloads", () => {

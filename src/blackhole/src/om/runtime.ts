@@ -186,6 +186,8 @@ export class Runtime {
   configLoaded = false;
   private baseConfig: Config = { ...DEFAULTS };
   private forgeOverrides: ForgeConfigOverrides = {};
+  /** True when context-forge.json's `observationalMemory: false` is overriding OM off. */
+  observationalMemoryDisabledByForge = false;
   /** Tracks the branch source tip already consolidated by pre-compaction consolidation
    *  so an immediate follow-up `session_before_compact` hook does not re-run the pipeline. */
   lastPreCompactionConsolidation:
@@ -593,8 +595,17 @@ export class Runtime {
       };
     }
     if (this.forgeOverrides.observationalMemoryEnabled === false) {
+      this.observationalMemoryDisabledByForge = true;
+      next.memory = false;
       next.consolidateBeforeCompaction = "off";
-    } else if (
+      return next;
+    }
+    this.observationalMemoryDisabledByForge = false;
+    if (next.memory === false) {
+      next.consolidateBeforeCompaction = "off";
+      return next;
+    }
+    if (
       this.forgeOverrides.consolidateBeforeCompaction &&
       this.forgeOverrides.consolidateBeforeCompaction !== "off"
     ) {

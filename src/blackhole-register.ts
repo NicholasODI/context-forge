@@ -76,6 +76,16 @@ export async function registerBlackholeMechanisms(
 
 	if (mechanisms.observationalMemory) {
 		registerConsolidationTrigger(pi, omRuntime, mechanisms);
+	} else {
+		// Keep session lifecycle tracking active even when background OM triggers
+		// are disabled, so pre-compaction consolidation and /blackhole-consolidate
+		// still track session switches and clean shutdowns.
+		pi.on("session_start", (_event: unknown, ctx: ExtensionContext) => {
+			omRuntime.startSession(ctx.sessionManager?.getSessionId?.());
+		});
+		pi.on("session_shutdown", () => {
+			omRuntime.dispose();
+		});
 	}
 	if (mechanisms.vccCompaction) {
 		registerBeforeCompactHook(pi, omRuntime, loadContinuity);

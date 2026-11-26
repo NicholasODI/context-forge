@@ -66,6 +66,7 @@ export function createContextForgeExtension(
 		pi.on("session_start", async (_event, ctx) => {
 			const config = loadConfig(ctx);
 			syncForgeOverrides(omRuntime, config);
+			omRuntime.startSession(ctx.sessionManager?.getSessionId?.());
 			if (initialized) return;
 			initialized = true;
 

@@ -659,6 +659,50 @@ async function awaitWithAbort(promise: Promise<void>, signal?: AbortSignal): Pro
 }
 
 /**
+ * Fast synchronous check for whether `consolidateBeforeCompaction` has work to
+ * run (or an in-flight consolidation to wait on). Used by the UI overlay wrapper
+ * so no-op compactions never flash a progress dialog.
+ */
+export function shouldRunPreCompactionConsolidation(
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  options?: { signal?: AbortSignal },
+): boolean {
+  runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
+  if (!isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction)) {
+    return false;
+  }
+  if (runtime.config.memory === false) return false;
+  if (matchesSkippedProvider(runtime.config, ctx.model)) return false;
+  if (
+    runtime.config.compaction === undefined &&
+    runtime.config.compactionEngine === undefined &&
+    runtime.config.passive === true
+  ) {
+    return false;
+  }
+  if (options?.signal?.aborted) return false;
+  if (runtime.preCompactionConsolidationPromise || runtime.consolidationInFlight) {
+    return true;
+  }
+  try {
+    const sessionId = ctx.sessionManager.getSessionId();
+    const entries = ctx.sessionManager.getBranch() as Entry[];
+    const lastSourceEntryId = entries.filter(isSourceEntry).at(-1)?.id;
+    if (!lastSourceEntryId) return false;
+    if (
+      runtime.lastPreCompactionConsolidation?.sessionId === sessionId &&
+      runtime.lastPreCompactionConsolidation.lastSourceEntryId === lastSourceEntryId
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fully consolidate all remaining tokens (Observer → Reflector → Dropper) right
  * before compaction runs. Awaits any in-flight background consolidation first,
  * bypasses normal token cadence thresholds and the 30s retry gate, and is

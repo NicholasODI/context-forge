@@ -132,21 +132,7 @@ export function registerCompactionTrigger(
   runtime: Runtime,
   inlineCompact: InlineCompaction = compactInlineAtTurnBoundary,
 ): void {
-  // Synchronous request gates: while pre-compaction consolidation is running,
-  // block new agent runs and outgoing provider requests until it completes.
-  pi.on("before_agent_start", async () => {
-    await runtime.waitForPreCompactionConsolidation();
-  });
-
-  pi.on("before_provider_request", async () => {
-    await runtime.waitForPreCompactionConsolidation();
-  });
-
-  pi.on("agent_start", async (_event: any, ctx: any) => {
-    // Wait for any active synchronous pre-compaction consolidation before
-    // resetting state or cancelling a pending idle-wait compaction.
-    await runtime.waitForPreCompactionConsolidation();
-
+  pi.on("agent_start", (_event: any, ctx: any) => {
     // Reset the info gate — allow one info notification during the new turn.
     runtime.resetInfoGate();
 
@@ -156,10 +142,9 @@ export function registerCompactionTrigger(
       runtime.ensureConfig(ctx.cwd, (msg: string) => ctx.ui?.notify?.(msg, "warning"));
     }
 
-    // A new turn is starting — abort any pending auto-compaction wait.
-    // The new turn's own agent_end will re-evaluate the threshold and
-    // schedule a fresh wait if compaction is still needed.
-    if (runtime.autoCompactionController) {
+    // A new turn is starting — abort any pending auto-compaction wait unless
+    // pre-compaction consolidation is actively running.
+    if (runtime.autoCompactionController && !runtime.preCompactionConsolidationPromise) {
       runtime.autoCompactionController.abort();
       runtime.autoCompactionController = null;
       runtime.compactInFlight = false;
@@ -184,9 +169,13 @@ export function registerCompactionTrigger(
     }
   });
 
-  pi.on("agent_end", async (event: any, ctx: any) => {
+  // Note: OMP enforces a 30s handler timeout on agent_end (which cannot be
+  // paused by dialogs). Pre-compaction consolidation runs inside the deferred
+  // compaction flow (headless) or inside session_before_compact's interactive
+  // progress overlay (interactive TUI, which pauses OMP's timeout budget).
+  pi.on("agent_end", (event: any, ctx: any) => {
     try {
-      await handleAgentEnd(pi, event, ctx, runtime);
+      handleAgentEnd(pi, event, ctx, runtime);
     } catch (error) {
       if (isStaleExtensionContextError(error)) return;
       throw error;
@@ -308,7 +297,12 @@ async function handleTurnEnd(
 
   runtime.compactInFlight = true;
 
+  // In interactive TUI sessions, let session_before_compact mount the progress
+  // overlay (which pauses OMP's 30s handler timeout budget). In headless/non-UI
+  // sessions, consolidate directly before inline/pause compaction.
+  const hasOverlayUI = ctx.hasUI && typeof ctx.ui?.custom === "function";
   if (
+    !hasOverlayUI &&
     isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
     runtime.config.memory !== false
   ) {
@@ -422,7 +416,7 @@ async function handleTurnEnd(
   });
 }
 
-async function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime): Promise<void> {
+function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime): void {
   runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
   // Reset the info gate — allow one notification during agent_end.
   runtime.resetInfoGate();
@@ -545,37 +539,6 @@ async function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: R
   );
 
   runtime.compactInFlight = true;
-
-  // Synchronous pre-compaction consolidation: block agent_end (the current
-  // request) until Observer → Reflector → Dropper finish consolidating all
-  // remaining tokens, before returning control and scheduling ctx.compact().
-  if (
-    isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
-    runtime.config.memory !== false
-  ) {
-    try {
-      await consolidateBeforeCompaction(pi, runtime, ctx);
-    } catch (error) {
-      if (isStaleExtensionContextError(error)) {
-        runtime.compactInFlight = false;
-        dbg("compaction_trigger.agent_end.pre_compact_stale_ctx", {
-          message: getErrorMessage(error),
-        });
-        recordStaleCtxSkip(runtime, hasUI, ui, sessionId);
-        return;
-      }
-      dbg("compaction_trigger.agent_end.pre_compact_error", {
-        message: getErrorMessage(error),
-      });
-      notifySafely(
-        hasUI,
-        ui,
-        `Observational memory: pre-compaction consolidation failed: ${getErrorMessage(error)}`,
-        "warning",
-      );
-    }
-  }
-
   const controller = new AbortController();
   runtime.autoCompactionController = controller;
   const signal = controller.signal;
@@ -702,7 +665,12 @@ async function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: R
         return;
       }
 
-      if (
+      // In interactive TUI sessions, let session_before_compact mount the progress
+  // overlay (which pauses OMP's 30s handler timeout budget). In headless/non-UI
+  // sessions, consolidate directly before inline/pause compaction.
+  const hasOverlayUI = ctx.hasUI && typeof ctx.ui?.custom === "function";
+  if (
+    !hasOverlayUI &&
     isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
     runtime.config.memory !== false
   ) {

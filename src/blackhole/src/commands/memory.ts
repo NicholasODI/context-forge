@@ -248,16 +248,26 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
             (runtime.config.model.thinking ? ` (${runtime.config.model.thinking})` : "")
           : "(session model)";
 
+      const omStatus =
+        runtime.config.memory === false
+          ? runtime.observationalMemoryDisabledByForge
+            ? "OFF (disabled by observationalMemory: false in context-forge.json)"
+            : "OFF (disabled by memory: false in blackhole settings)"
+          : "ON";
+
       const preCompactStatus =
-        runtime.config.consolidateBeforeCompaction === "only"
-          ? "ONLY (background triggers bypassed; full Observer → Reflector → Dropper before compaction)"
-          : runtime.config.consolidateBeforeCompaction === "flush"
-            ? "FLUSH (background triggers active + full Observer → Reflector → Dropper before compaction)"
-            : "OFF";
+        runtime.config.memory === false
+          ? "OFF (observational memory is OFF)"
+          : runtime.config.consolidateBeforeCompaction === "only"
+            ? "ONLY (background triggers bypassed; full Observer → Reflector → Dropper before compaction)"
+            : runtime.config.consolidateBeforeCompaction === "flush"
+              ? "FLUSH (background triggers active + full Observer → Reflector → Dropper before compaction)"
+              : "OFF";
 
       const lines = [
         ...passiveLines,
         "── Memory ──",
+        `OM status:      ${omStatus}`,
         observationLine,
         reflectionLine,
         `Consolidator:   ${consolidatorModelLabel}`,

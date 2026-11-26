@@ -23,7 +23,8 @@ import { buildAppendOnlyDetails, coverageForMessages } from "../core/compaction-
 import { getModelProvider, matchesSkippedProvider } from "../core/provider-skip.js";
 import type { PiVccCompactionDetails } from "../details";
 import { buildCompactionProjection, renderSummary, PinnedMemoryOverflowError } from "../om/ledger/index.js";
-import { consolidateBeforeCompaction, flushPendingOMToBranch } from "../om/consolidation.js";
+import { flushPendingOMToBranch } from "../om/consolidation.js";
+import { runPreCompactionConsolidationWithUI } from "../om/pre-compact-overlay.js";
 import type { Runtime } from "../om/runtime.js";
 import { OM_SELECTION, type SelectionSnapshot } from "../om/ledger/diagnostics.js";
 import { debugLog } from "../om/debug-log.js";
@@ -728,7 +729,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
     );
     let projectionBranchEntries = branchEntries as any[];
     if (omRuntime.config.memory !== false && preCompactEnabled) {
-      const preResult = await consolidateBeforeCompaction(pi, omRuntime, ctx as any, {
+      const preResult = await runPreCompactionConsolidationWithUI(pi, omRuntime, ctx as any, {
         signal: event.signal,
       });
       if (event.signal?.aborted) {

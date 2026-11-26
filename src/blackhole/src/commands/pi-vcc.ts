@@ -14,9 +14,9 @@ import {
   formatCompactionStats,
 } from "../hooks/before-compact";
 import {
-  consolidateBeforeCompaction,
   flushPendingOMToBranch,
 } from "../om/consolidation.ts";
+import { runPreCompactionConsolidationWithUI } from "../om/pre-compact-overlay.ts";
 import {
   getCompactionIneligibility,
   type CompactionIneligibility,
@@ -184,7 +184,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
         isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
         runtime.config.memory !== false
       ) {
-        await consolidateBeforeCompaction(pi, runtime, ctx as any);
+        await runPreCompactionConsolidationWithUI(pi, runtime, ctx as any);
       }
 
       // If compaction is manual (or legacy noAutoCompact): flush pending OM entries
