@@ -110,6 +110,7 @@ export function applyEnvOverrides<T extends object>(
 export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   // Booleans
   memory: "PI_BLACKHOLE_MEMORY",
+  consolidateBeforeCompaction: "PI_BLACKHOLE_CONSOLIDATE_BEFORE_COMPACTION",
   debug: "PI_BLACKHOLE_DEBUG",
   debugLog: "PI_BLACKHOLE_DEBUG_LOG",
   sessionFallback: "PI_BLACKHOLE_SESSION_FALLBACK",
@@ -259,5 +260,17 @@ export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   cacheRetention: {
     var: "PI_BLACKHOLE_CACHE_RETENTION",
     parse: (raw: string) => normalizeCacheRetention(raw),
+  },
+  // Separate consolidator model ("provider/id") for all OM workers.
+  model: {
+    var: "PI_BLACKHOLE_MODEL",
+    parse: (raw: string) => {
+      const trimmed = raw.trim();
+      const slash = trimmed.indexOf("/");
+      if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+      const provider = trimmed.slice(0, slash).trim();
+      const id = trimmed.slice(slash + 1).trim();
+      return provider && id ? { provider, id } : undefined;
+    },
   },
 };

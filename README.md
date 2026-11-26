@@ -99,9 +99,14 @@ Example:
   "observationalMemory": true,
   "vccCompaction": true,
   "unifiedRecall": true,
-  "projectMemory": true
+  "projectMemory": true,
+  "consolidatorModel": "default",
+  "consolidateBeforeCompaction": false
 }
 ```
+
+- `consolidatorModel`: `"default"` (inherits `pi-blackhole-config.json` / active session model) or `"provider/model"` picked from OMP's available model list via `/context-forge` (or `model` in `/blackhole settings`) to run Observer, Reflector, and Dropper on a separate model.
+- `consolidateBeforeCompaction`: when `true`, runs full observational memory consolidation (Observer → Reflector → Dropper) over all remaining tokens immediately before every compaction with blackhole. Configurable globally or project-locally in both `/context-forge` and `/blackhole settings` (or via `PI_BLACKHOLE_CONSOLIDATE_BEFORE_COMPACTION`).
 
 The pi-blackhole-derived mechanisms additionally read pi-blackhole's own `blackhole-config.json` for fine-grained tuning; `context-forge.json` only gates whether those mechanisms are registered at all.
 

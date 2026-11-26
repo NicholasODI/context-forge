@@ -13,17 +13,14 @@ import {
   notifyMigrationReminder,
   formatCompactionStats,
 } from "../hooks/before-compact";
-import { readPendingState, clearPendingState, hasPendingData } from "../om/pending.ts";
+import {
+  consolidateBeforeCompaction,
+  flushPendingOMToBranch,
+} from "../om/consolidation.ts";
 import {
   getCompactionIneligibility,
   type CompactionIneligibility,
 } from "../om/inline-compaction.ts";
-import {
-  OM_OBSERVATIONS_DROPPED,
-  OM_OBSERVATIONS_RECORDED,
-  OM_OBSERVATIONS_UNANCHORED,
-  OM_REFLECTIONS_RECORDED,
-} from "../om/ledger/index.ts";
 
 /**
  * One message per host refusal, shared by the pre-check and the onError
@@ -86,8 +83,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
         const { openBlackholeSettings, config, GLOBAL_CONFIG_DIR } =
           await import("../pi-base/blackhole-settings.ts");
         await openBlackholeSettings(ctx);
-        runtime.config = config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config;
-        runtime.configLoaded = true;
+        runtime.applyLoadedConfig(config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config);
         return;
       }
       if (trimmed === "changelog") {
@@ -109,7 +105,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
             ctx.cwd,
             GLOBAL_CONFIG_DIR,
           );
-          runtime.config = config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config;
+          runtime.applyLoadedConfig(config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config);
           ctx.ui.notify(
             "Observational memory disabled. Use /blackhole om-on to re-enable.",
             "info",
@@ -132,7 +128,7 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
             ctx.cwd,
             GLOBAL_CONFIG_DIR,
           );
-          runtime.config = config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config;
+          runtime.applyLoadedConfig(config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config);
           ctx.ui.notify("Observational memory enabled.", "info");
         } catch {
           ctx.ui.notify(
@@ -180,47 +176,16 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
         return;
       }
 
+      // Optional pre-compaction full observational memory consolidation
+      // (Observer → Reflector → Dropper over all remaining tokens). Runs before
+      // manual-mode pending flush and outside session_before_compact's timeout.
+      if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+        await consolidateBeforeCompaction(pi, runtime, ctx as any);
+      }
+
       // If compaction is manual (or legacy noAutoCompact): flush pending OM entries
       // into the branch before compacting so the summary includes accumulated memory.
-      if (runtime.config.compaction === "manual" && hasPendingData(sessionId)) {
-        const pending = readPendingState(sessionId);
-        // Write all accumulated observation batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const obsBatches = pending.observationBatches?.length
-          ? pending.observationBatches
-          : pending.observation
-            ? [pending.observation]
-            : [];
-        for (const batch of obsBatches) {
-          pi.appendEntry(OM_OBSERVATIONS_RECORDED, batch.data);
-        }
-        // Write all accumulated reflection batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const reflBatches = pending.reflectionBatches?.length
-          ? pending.reflectionBatches
-          : pending.reflection
-            ? [pending.reflection]
-            : [];
-        for (const batch of reflBatches) {
-          pi.appendEntry(OM_REFLECTIONS_RECORDED, batch.data);
-        }
-        // Write all accumulated dropper batches (or latest single batch
-        // as fallback for legacy pending.json without batch arrays).
-        const dropBatches = pending.droppedBatches?.length
-          ? pending.droppedBatches
-          : pending.dropped
-            ? [pending.dropped]
-            : [];
-        for (const batch of dropBatches) {
-          pi.appendEntry(OM_OBSERVATIONS_DROPPED, batch.data);
-        }
-        // Write all accumulated unanchored batches under their own key: kept
-        // tail facts carry no coverage claim, so flushing them as recorded
-        // entries would advance coverage markers over entries never proven.
-        for (const batch of pending.unanchoredBatches ?? []) {
-          pi.appendEntry(OM_OBSERVATIONS_UNANCHORED, batch.data);
-        }
-        clearPendingState(sessionId);
+      if (runtime.config.compaction === "manual" && flushPendingOMToBranch(pi, sessionId)) {
         ctx.ui.notify("Observational memory: pending entries flushed", "info");
       }
 

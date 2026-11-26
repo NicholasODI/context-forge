@@ -50,6 +50,8 @@ import { serializeSourceAddressedBranchEntries } from "./serialize.js";
 
 import {
   readPendingState,
+  clearPendingState,
+  hasPendingData,
   savePendingObservation,
   savePendingReflection,
   savePendingDropped,
@@ -154,6 +156,12 @@ function workerFailure(worker: string, attempts: number, model: string, firstErr
  * work_docs/plan-observer-coverage-completion.md).
  */
 export const OBSERVER_DRAIN_MAX_BATCHES = 3;
+
+/**
+ * Higher observer drain limit for pre-compaction full consolidation so all
+ * remaining source chunks up to the branch tip are observed before compaction.
+ */
+export const PRE_COMPACTION_OBSERVER_DRAIN_MAX_BATCHES = 32;
 
 /**
  * How many fit-to-window batches one reflector/dropper shrink pass may run
@@ -493,6 +501,211 @@ export type ConsolidationLaunchResult =
   | { outcome: "launched"; runId: string }
   | { outcome: "skipped"; reason: string };
 
+/** Outcome of a synchronous pre-compaction full consolidation pass. */
+export type PreCompactionConsolidationResult =
+  | { outcome: "ran" }
+  | { outcome: "skipped"; reason: string };
+
+export interface ConsolidationPipelineOptions {
+  /** Bypass token cadence thresholds and drain remaining backlog across Observer, Reflector, and Dropper. */
+  readonly forceFull?: boolean;
+}
+
+/**
+ * Flush manual-mode pending OM batches into the active session branch and clear
+ * pending.json. Returns true when at least one pending batch was flushed.
+ */
+export function flushPendingOMToBranch(pi: ExtensionAPI, sessionId: string): boolean {
+  if (!hasPendingData(sessionId)) return false;
+  const pending = readPendingState(sessionId);
+  const obsBatches = pending.observationBatches?.length
+    ? pending.observationBatches
+    : pending.observation
+      ? [pending.observation]
+      : [];
+  for (const batch of obsBatches) {
+    pi.appendEntry(OM_OBSERVATIONS_RECORDED, batch.data);
+  }
+  const reflBatches = pending.reflectionBatches?.length
+    ? pending.reflectionBatches
+    : pending.reflection
+      ? [pending.reflection]
+      : [];
+  for (const batch of reflBatches) {
+    pi.appendEntry(OM_REFLECTIONS_RECORDED, batch.data);
+  }
+  const dropBatches = pending.droppedBatches?.length
+    ? pending.droppedBatches
+    : pending.dropped
+      ? [pending.dropped]
+      : [];
+  for (const batch of dropBatches) {
+    pi.appendEntry(OM_OBSERVATIONS_DROPPED, batch.data);
+  }
+  for (const batch of pending.unanchoredBatches ?? []) {
+    pi.appendEntry(OM_OBSERVATIONS_UNANCHORED, batch.data);
+  }
+  clearPendingState(sessionId);
+  return true;
+}
+
+async function awaitWithAbort(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) {
+    await promise;
+    return;
+  }
+  if (signal.aborted) return;
+  let onAbort: (() => void) | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<void>((resolve) => {
+        onAbort = () => resolve();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Fully consolidate all remaining tokens (Observer → Reflector → Dropper) right
+ * before compaction runs. Awaits any in-flight background consolidation first,
+ * bypasses normal token cadence thresholds and the 30s retry gate, and is
+ * idempotent for the same branch source tip so calling it before `ctx.compact()`
+ * and again in `session_before_compact` performs the work at most once.
+ */
+export async function consolidateBeforeCompaction(
+  pi: ExtensionAPI,
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  options?: { signal?: AbortSignal },
+): Promise<PreCompactionConsolidationResult> {
+  runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
+  return withDebugLogContext(
+    { enabled: runtime.config.debugLog === true, cwd: ctx.cwd },
+    async (): Promise<PreCompactionConsolidationResult> => {
+      const skipPre = (reason: string): PreCompactionConsolidationResult => {
+        debugLog("pre_compaction_consolidation.skip", { reason });
+        return { outcome: "skipped", reason };
+      };
+
+      if (!runtime.config.consolidateBeforeCompaction) return skipPre("disabled");
+      if (runtime.config.memory === false) return skipPre("memory_false");
+      if (matchesSkippedProvider(runtime.config, ctx.model)) return skipPre("provider_skip");
+      if (
+        runtime.config.compaction === undefined &&
+        runtime.config.compactionEngine === undefined &&
+        runtime.config.passive === true
+      ) {
+        return skipPre("legacy_passive");
+      }
+      if (options?.signal?.aborted) return skipPre("aborted");
+
+      // Wait for any already-running consolidation cycle instead of skipping.
+      while (runtime.consolidationInFlight && runtime.consolidationPromise) {
+        debugLog("pre_compaction_consolidation.await_inflight", {});
+        await awaitWithAbort(runtime.consolidationPromise, options?.signal);
+        if (options?.signal?.aborted) return skipPre("aborted");
+      }
+
+      let sessionId: string;
+      let entries: Entry[];
+      try {
+        sessionId = ctx.sessionManager.getSessionId();
+        entries = ctx.sessionManager.getBranch() as Entry[];
+      } catch (error) {
+        if (isStaleExtensionContextError(error)) return skipPre("stale_ctx");
+        throw error;
+      }
+
+      if (runtime.cursorsLoadedSessionId !== sessionId) {
+        if (typeof runtime.loadCursorsFromPending === "function") {
+          runtime.loadCursorsFromPending(sessionId);
+        }
+        validateCursors(entries, runtime);
+        runtime.cursorsLoadedSessionId = sessionId;
+      }
+
+      const lastSourceEntryId = entries.filter(isSourceEntry).at(-1)?.id;
+      if (!lastSourceEntryId) return skipPre("no_source_entries");
+
+      if (
+        runtime.lastPreCompactionConsolidation?.sessionId === sessionId &&
+        runtime.lastPreCompactionConsolidation.lastSourceEntryId === lastSourceEntryId
+      ) {
+        return skipPre("already_consolidated");
+      }
+
+      const baseGeneration = runtime.captureGeneration(currentSessionIdentity(ctx));
+      if (!runtime.isGenerationActive(baseGeneration)) return skipPre("generation_inactive");
+
+      const linkedController = new AbortController();
+      const abortLinked = () => linkedController.abort();
+      if (baseGeneration.signal.aborted || options?.signal?.aborted) {
+        return skipPre("aborted");
+      }
+      baseGeneration.signal.addEventListener("abort", abortLinked, { once: true });
+      options?.signal?.addEventListener("abort", abortLinked, { once: true });
+
+      const effectiveGeneration: RuntimeGeneration = {
+        generation: baseGeneration.generation,
+        sessionIdentity: baseGeneration.sessionIdentity,
+        signal: linkedController.signal,
+      };
+
+      const runId = `pre-compact-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+      const consolidationCtx: ConsolidationCtx = {
+        cwd: ctx.cwd,
+        hasUI: ctx.hasUI,
+        ui: ctx.ui,
+        model: ctx.model,
+        modelRegistry: ctx.modelRegistry,
+        sessionManager: ctx.sessionManager,
+      };
+
+      debugLog("pre_compaction_consolidation.start", {
+        runId,
+        sessionId,
+        lastSourceEntryId,
+        entryCount: entries.length,
+        unobservedTokens: rawTokensSinceObservationCoverage(entries),
+      });
+      runtime.tryEmitWorkerInfo(
+        ctx.hasUI,
+        ctx.ui,
+        "Observational memory: consolidating remaining tokens before compaction (Observer → Reflector → Dropper)",
+      );
+
+      try {
+        await runtime.launchConsolidationTask(ctx, async () =>
+          withDebugLogContext(
+            { enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId },
+            async () => {
+              if (!runtime.isGenerationActive(effectiveGeneration)) return;
+              await runConsolidationPipeline(pi, runtime, consolidationCtx, effectiveGeneration, {
+                forceFull: true,
+              });
+            },
+          ),
+        );
+      } finally {
+        baseGeneration.signal.removeEventListener("abort", abortLinked);
+        options?.signal?.removeEventListener("abort", abortLinked);
+      }
+
+      if (options?.signal?.aborted || !runtime.isGenerationActive(effectiveGeneration)) {
+        return skipPre("aborted");
+      }
+
+      runtime.lastPreCompactionConsolidation = { sessionId, lastSourceEntryId };
+      debugLog("pre_compaction_consolidation.complete", { runId, sessionId, lastSourceEntryId });
+      return { outcome: "ran" };
+    },
+  );
+}
+
 /**
  * Shared proactive-entry for consolidation launches. Both the automatic
  * triggers and the manual command route through here: ensureConfig first
@@ -649,8 +862,10 @@ export async function runConsolidationPipeline(
   runtime: Runtime,
   ctx: ConsolidationCtx,
   generation: RuntimeGeneration,
+  options?: ConsolidationPipelineOptions,
 ): Promise<void> {
   if (!runtime.isGenerationActive(generation)) return;
+  const forceFull = options?.forceFull === true;
   const resolveModel = makeModelResolver(runtime, ctx, generation);
 
   runtime.consolidationPhase = "observer";
@@ -659,7 +874,16 @@ export async function runConsolidationPipeline(
   runtime.sizeSkippedInCycle.clear();
   runtime.resolveFailureNotified = false;
   try {
-    const observerOutcome = await runObserverStage(pi, runtime, ctx, generation, resolveModel);
+    const observerOutcome = await runObserverStage(
+      pi,
+      runtime,
+      ctx,
+      generation,
+      resolveModel,
+      false,
+      forceFull ? PRE_COMPACTION_OBSERVER_DRAIN_MAX_BATCHES : OBSERVER_DRAIN_MAX_BATCHES,
+      forceFull,
+    );
     if (!runtime.isGenerationActive(generation) || observerOutcome === "abort") return;
   } catch (error) {
     if (!runtime.isGenerationActive(generation)) return;
@@ -678,7 +902,14 @@ export async function runConsolidationPipeline(
   runtime.resolveFailureNotified = false;
   let reflectorResult: ReflectorStageResult;
   try {
-    reflectorResult = await runReflectorStage(pi, runtime, ctx, generation, resolveModel);
+    reflectorResult = await runReflectorStage(
+      pi,
+      runtime,
+      ctx,
+      generation,
+      resolveModel,
+      forceFull,
+    );
     if (!runtime.isGenerationActive(generation) || reflectorResult.outcome === "abort") return;
   } catch (error) {
     if (!runtime.isGenerationActive(generation)) return;
@@ -702,6 +933,7 @@ export async function runConsolidationPipeline(
       resolveModel,
       reflectorResult.sameRunReflections,
       reflectorResult.effectiveReflectionCoverageId,
+      forceFull,
     );
   } catch (error) {
     if (!runtime.isGenerationActive(generation)) return;
@@ -832,6 +1064,7 @@ export async function runObserverStage(
   resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
   drain = false,
   drainRemaining: number = OBSERVER_DRAIN_MAX_BATCHES,
+  forceFull = false,
 ): Promise<StageOutcome> {
   if (!runtime.isGenerationActive(generation)) return "abort";
   let entries: Entry[];
@@ -874,7 +1107,7 @@ export async function runObserverStage(
   // already fired, and the remainder of its backlog is often below the
   // threshold. Holding it back until more content arrives would re-cap the
   // same backlog instead of finishing what the first batch started.
-  if (tokens < runtime.config.observeAfterTokens && !drain) {
+  if (tokens < runtime.config.observeAfterTokens && !drain && !forceFull) {
     // Not due. Keep the anchor at the measured coverage point rather than the
     // newest entry: below-threshold content is still unobserved, so moving the
     // cursor past it would drop it permanently instead of letting it accumulate.
@@ -920,7 +1153,16 @@ export async function runObserverStage(
   const continueSources = (): StageOutcome | Promise<StageOutcome> => {
     if (drainRemaining <= 0) return "continue";
     if (!coversUpToId || coversUpToId === lastSourceEntryId) return "continue";
-    return runObserverStage(pi, runtime, ctx, generation, resolveModel, true, drainRemaining - 1);
+    return runObserverStage(
+      pi,
+      runtime,
+      ctx,
+      generation,
+      resolveModel,
+      true,
+      drainRemaining - 1,
+      forceFull,
+    );
   };
   let chunkTokens = estimateStringTokens(chunk);
   // Issue #110 follow-up: expose the post-cap size on the normal path (the
@@ -1746,6 +1988,7 @@ export async function runReflectorStage(
   ctx: ConsolidationCtx,
   generation: RuntimeGeneration,
   resolveModel: (stage: "reflector") => Promise<ResolvedModel | undefined>,
+  forceFull = false,
 ): Promise<ReflectorStageResult> {
   if (!runtime.isGenerationActive(generation)) return { outcome: "abort", sameRunReflections: [] };
   let entries: Entry[];
@@ -1798,12 +2041,12 @@ export async function runReflectorStage(
     // falling back to observation coverage). A below-threshold result must
     // not advance the cursor or reset the anchor.
     reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, pending, runtime.getCursor("reflector"));
-    if (reflectionTokens < runtime.config.reflectAfterTokens) {
+    if (reflectionTokens < runtime.config.reflectAfterTokens && !forceFull) {
       return { outcome: "continue", sameRunReflections: [] };
     }
   } else {
     reflectionTokens = reflectionAccumulatedTokens(entries, runtime.config, undefined, runtime.getCursor("reflector"));
-    if (reflectionTokens < runtime.config.reflectAfterTokens) {
+    if (reflectionTokens < runtime.config.reflectAfterTokens && !forceFull) {
       // Below threshold: do NOT advance the cursor. Advancing here would
       // reset the accumulation anchor and lose progress toward the threshold
       // (the confirmed scheduling defect). The cursor only moves on actual
@@ -1821,6 +2064,16 @@ export async function runReflectorStage(
   // Snapshot the run input once: entries are fixed for this invocation, and
   // both the attempt loop and the shrink-to-fit batch pass share it.
   const input = computeReflectorInput(runtime, entries, sessionId, reflectionTokens);
+  if (forceFull && input.newObservations.length === 0 && input.newReflections.length === 0) {
+    runtime.advanceCursor(
+      "reflector",
+      observationCoverageId ?? entries.at(-1)?.id ?? "unknown",
+      "empty",
+      undefined,
+      reviewSignature,
+    );
+    return { outcome: "continue", sameRunReflections: [] };
+  }
   const reflectorStaticTokens = await workerStaticPromptTokens("reflector");
 
   // Shared commit tail: normal and batched runs both advance the cursor at
@@ -2378,6 +2631,7 @@ export async function runDropperStage(
   resolveModel: (stage: "dropper") => Promise<ResolvedModel | undefined>,
   sameRunReflections: Reflection[],
   sameRunReflectionCoverageId: string | undefined,
+  forceFull = false,
 ): Promise<StageOutcome> {
   if (!runtime.isGenerationActive(generation)) return "abort";
   let entries: Entry[];
@@ -2405,10 +2659,10 @@ export async function runDropperStage(
     observationPoolTokens(entries, pressurePending).tokens,
   );
   const pressureAlreadyChecked =
-    pressureReached && matchesEmptyPressurePool(runtime, pressurePoolSignature);
-  // Pressure bypasses the cadence and new-data gates only while this pool has
-  // not already been evaluated under pressure and left unchanged.
-  const pressureRun = pressureReached && !pressureAlreadyChecked;
+    (pressureReached || forceFull) && matchesEmptyPressurePool(runtime, pressurePoolSignature);
+  // Pressure (or pre-compaction forceFull) bypasses the cadence and new-data
+  // gates only while this pool has not already been evaluated and left unchanged.
+  const pressureRun = (pressureReached || forceFull) && !pressureAlreadyChecked;
   // Advancing to "skipped"/"not_due" would replace the empty cursor and its
   // signature, re-arming pressure against a pool the dropper already declined —
   // so a pending pressure binding wins over bookkeeping advances.
@@ -2486,12 +2740,13 @@ export async function runDropperStage(
   );
 
   const poolTokens = input.newObservations.reduce((sum, o) => sum + observationRenderedTokens(o), 0);
+  const effectiveSkipFullness = forceFull ? 0 : runtime.config.dropperPoolFullnessThreshold;
   const globalMaxDrops = Math.min(input.eligibleObservations.length, maxDropCountForPool(
     input.newObservations, poolTokens, runtime.config.observationsPoolMaxTokens,
-    runtime.config.dropperPoolFullnessThreshold, runtime.config.observationsPoolTargetTokens,
+    effectiveSkipFullness, runtime.config.observationsPoolTargetTokens,
   ));
   debugLog("dropper.eligibility", { ...input.eligibility.counts, tokens: input.eligibility.tokens,
-    providedReflectionCount: input.reflectionsForDropper.length, poolTokens, maxDropsAllowed: globalMaxDrops, scope: pressureRun ? "pressure-pool" : "cadence-delta" });
+    providedReflectionCount: input.reflectionsForDropper.length, poolTokens, maxDropsAllowed: globalMaxDrops, scope: pressureRun ? (forceFull ? "pre-compact-pool" : "pressure-pool") : "cadence-delta" });
 
   // Shared commit tail: normal and batched runs both advance the cursor at
   // most once, after all work for this invocation is done.
@@ -2519,17 +2774,18 @@ export async function runDropperStage(
       runtime.advanceCursor("dropper", coversUpToId, "recorded");
     } else {
       // No drops selected (maxDropsAllowed=0 or the model returned no
-      // candidates). Under pressure, bind that empty result to the branch tip
-      // and to this pool's id signature, so the next due-check skips an
-      // unchanged pool instead of repeating the same model call — a pool
-      // change rewrites the signature and re-arms pressure.
+      // candidates). Under pressure or forceFull, bind that empty result to
+      // the branch tip and to this pool's id signature, so the next due-check
+      // skips an unchanged pool instead of repeating the same model call — a
+      // pool change rewrites the signature and re-arms.
+      const bindEmptyPool = pressureReached || forceFull;
       runtime.advanceCursor(
         "dropper",
-        pressureReached
+        bindEmptyPool
           ? (entries.at(-1)?.id ?? "unknown")
           : (coversUpToId ?? observationCoverageId ?? entries.at(-1)?.id ?? "unknown"),
         "empty",
-        pressureReached ? pressurePoolSignature : undefined,
+        bindEmptyPool ? pressurePoolSignature : undefined,
       );
     }
     const selectedIds = new Set(data?.observationIds ?? []);
@@ -2662,7 +2918,7 @@ export async function runDropperStage(
               existingObservationsSummary: input.existingObservationsSummary || undefined,
               budgetTokens: runtime.config.observationsPoolMaxTokens,
               targetTokens: runtime.config.observationsPoolTargetTokens,
-              skipFullness: runtime.config.dropperPoolFullnessThreshold,
+              skipFullness: effectiveSkipFullness,
               pressure: { tokens: poolTokens, maxDrops: globalMaxDrops },
               rawProposals: true,
               maxOutputTokens: workerOutputAllowance(best.ctx, bestModel, runtime.config.workerOutputMaxTokens),
@@ -2830,7 +3086,7 @@ export async function runDropperStage(
             existingObservationsSummary: input.existingObservationsSummary || undefined,
             budgetTokens: runtime.config.observationsPoolMaxTokens,
             targetTokens: runtime.config.observationsPoolTargetTokens,
-            skipFullness: runtime.config.dropperPoolFullnessThreshold,
+            skipFullness: effectiveSkipFullness,
             maxTurns: runtime.config.agentMaxTurns,
             thinkingLevel: stageThinkingLevel(runtime, "dropper", stageModelForThinking),
             providerIdleTimeoutMs: runtime.config.providerIdleTimeoutMs,

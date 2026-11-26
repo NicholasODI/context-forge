@@ -14,7 +14,7 @@
  */
 
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { loadContextForgeConfig, type ContextForgeConfig } from "./config.ts";
+import { loadContextForgeConfig, parseConsolidatorModel, type ContextForgeConfig } from "./config.ts";
 import { registerActionFusion } from "./extensions/action-fusion/index.ts";
 import { registerObservationPack } from "./extensions/observation-pack/index.ts";
 import { registerEvidencePreservingReducer } from "./extensions/evidence-preserving-reducer/index.ts";
@@ -33,26 +33,41 @@ export function createContextForgeExtension(
 	return (pi) => {
 		let initialized = false;
 
+		const syncForgeOverrides = (omRuntime: Runtime, forgeConfig: ContextForgeConfig): void => {
+			omRuntime.setForgeOverrides({
+				consolidatorModel: parseConsolidatorModel(forgeConfig.consolidatorModel),
+				consolidateBeforeCompaction: forgeConfig.consolidateBeforeCompaction,
+				observationalMemoryEnabled: forgeConfig.observationalMemory,
+			});
+		};
+
 		// Eager slash command registration — available immediately without
 		// waiting for session_start, so commands work after omp restart.
 		const omRuntime = new Runtime();
 		registerBlackholeCommands(pi, omRuntime);
-		registerForgeSettings(pi, async ctx => {
-			const { openBlackholeSettings, config, GLOBAL_CONFIG_DIR } =
-				await import("./blackhole/src/pi-base/blackhole-settings.ts");
-			await openBlackholeSettings(ctx);
-			omRuntime.config = config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config;
-			omRuntime.configLoaded = true;
-		});
+		registerForgeSettings(
+			pi,
+			async ctx => {
+				const { openBlackholeSettings, config, GLOBAL_CONFIG_DIR } =
+					await import("./blackhole/src/pi-base/blackhole-settings.ts");
+				await openBlackholeSettings(ctx);
+				syncForgeOverrides(omRuntime, loadConfig(ctx));
+				omRuntime.applyLoadedConfig(config.loadWithWarnings(ctx.cwd, GLOBAL_CONFIG_DIR).config);
+			},
+			ctx => {
+				syncForgeOverrides(omRuntime, loadConfig(ctx));
+			},
+		);
 		const projectMemory = registerProjectMemory(pi, ctx => loadConfig(ctx).projectMemory);
 		// launch contexts are the host extension context; the archive callback
 		// rechecks trust/config and snapshots the live manager, without worker cursors.
 		omRuntime.onConsolidationSettled = ctx => projectMemory.checkpoint(ctx as ExtensionContext);
 
 		pi.on("session_start", async (_event, ctx) => {
+			const config = loadConfig(ctx);
+			syncForgeOverrides(omRuntime, config);
 			if (initialized) return;
 			initialized = true;
-			const config = loadConfig(ctx);
 
 			// ── SoL-Pi mechanisms (context handlers see raw messages first) ──
 			if (config.actionFusion) registerActionFusion(pi);

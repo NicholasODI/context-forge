@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_CONFIG,
+  DEFAULT_CONSOLIDATOR_MODEL,
   FORGE_FIELDS,
   validForgeValue,
   loadContextForgeConfig,
@@ -25,6 +26,15 @@ interface SettingsUI {
   select(title: string, options: string[]): Promise<string | undefined>;
   input(title: string, placeholder?: string): Promise<string | undefined>;
   notify(message: string, level?: "info" | "warning" | "error"): void;
+}
+
+export interface ForgeModelOption {
+  readonly value: string;
+  readonly label: string;
+}
+
+export interface OpenForgeSettingsOptions {
+  readonly listModels?: () => ForgeModelOption[];
 }
 
 /** Atomic replacement with an optimistic check against changes made while the menu was open. */
@@ -55,6 +65,7 @@ export async function openForgeSettings(
   ui: SettingsUI,
   initial: ContextForgeConfig,
   save: (config: ContextForgeConfig) => void,
+  settingsOptions?: OpenForgeSettingsOptions,
 ): Promise<void> {
   let draft = { ...initial };
   while (true) {
@@ -77,7 +88,39 @@ export async function openForgeSettings(
     if (field) {
       if (field.kind === "boolean")
         draft = { ...draft, [field.key]: !draft[field.key] };
-      else {
+      else if (field.kind === "model") {
+        const models = settingsOptions?.listModels?.() ?? [];
+        const defaultOption = `Use session / blackhole default (${DEFAULT_CONSOLIDATOR_MODEL})`;
+        const manualOption = "Enter provider/model manually";
+        const modelLabels = models.map((model) =>
+          model.value === draft[field.key] ? `${model.label} [current]` : model.label,
+        );
+        const picked = await ui.select(
+          `${field.label} — choose from OMP models or enter manually`,
+          [defaultOption, ...modelLabels, manualOption],
+        );
+        if (!picked) continue;
+        if (picked === defaultOption) {
+          draft = { ...draft, [field.key]: DEFAULT_CONSOLIDATOR_MODEL };
+        } else if (picked === manualOption) {
+          const value = await ui.input(
+            `${field.label} (provider/model, or "${DEFAULT_CONSOLIDATOR_MODEL}")`,
+            String(draft[field.key]),
+          );
+          if (value === undefined) continue;
+          const parsed = value.trim();
+          if (!validForgeValue(field, parsed))
+            ui.notify(
+              `Enter "${DEFAULT_CONSOLIDATOR_MODEL}" or a valid "provider/model" value.`,
+              "error",
+            );
+          else draft = { ...draft, [field.key]: parsed };
+        } else {
+          const pickedIndex = modelLabels.indexOf(picked);
+          const selected = pickedIndex >= 0 ? models[pickedIndex] : undefined;
+          if (selected) draft = { ...draft, [field.key]: selected.value };
+        }
+      } else {
         const value = await ui.input(
           field.kind === "number"
             ? `${field.label} (finite number, zero or greater)`
@@ -106,7 +149,7 @@ export async function openForgeSettings(
       try {
         save(draft);
         ui.notify(
-          "Settings saved. Restart OMP to apply all changes. Advanced tuning: /blackhole settings.",
+          "Settings saved. Consolidator and pre-compaction options apply immediately; restart OMP for feature toggles. Advanced tuning: /blackhole settings.",
           "info",
         );
         return;
@@ -120,11 +163,34 @@ export async function openForgeSettings(
   }
 }
 
+function listAvailableOmpModels(
+  ctx: import("@earendil-works/pi-coding-agent").ExtensionContext,
+): ForgeModelOption[] {
+  const available = ctx.modelRegistry?.getAvailable?.() ?? [];
+  const seen = new Set<string>();
+  const options: ForgeModelOption[] = [];
+  for (const model of available) {
+    if (!model || typeof model.provider !== "string" || typeof model.id !== "string") continue;
+    const value = `${model.provider}/${model.id}`;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const name =
+      typeof model.name === "string" && model.name.trim() && model.name !== model.id
+        ? ` (${model.name})`
+        : "";
+    options.push({ value, label: `${value}${name}` });
+  }
+  return options;
+}
+
 export function registerForgeSettings(
   pi: ExtensionAPI,
   openAdvanced: (
     ctx: import("@earendil-works/pi-coding-agent").ExtensionContext,
   ) => Promise<void>,
+  onSaved?: (
+    ctx: import("@earendil-works/pi-coding-agent").ExtensionContext,
+  ) => void,
 ): void {
   pi.registerCommand("context-forge", {
     description:
@@ -179,13 +245,19 @@ export function registerForgeSettings(
           getAgentDir(),
           isProject,
         );
-        await openForgeSettings(ctx.ui, initial, (config) => {
-          if (isProject && !ctx.isProjectTrusted())
-            throw new Error(
-              "Project trust is required to save project settings.",
-            );
-          saveSettings(path, config, original);
-        });
+        await openForgeSettings(
+          ctx.ui,
+          initial,
+          (config) => {
+            if (isProject && !ctx.isProjectTrusted())
+              throw new Error(
+                "Project trust is required to save project settings.",
+              );
+            saveSettings(path, config, original);
+            onSaved?.(ctx);
+          },
+          { listModels: () => listAvailableOmpModels(ctx) },
+        );
       } catch (error) {
         ctx.ui.notify(
           `Unable to open settings: ${error instanceof Error ? error.message : String(error)}`,

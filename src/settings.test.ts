@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG, loadContextForgeConfig } from "./config.ts";
 import {
@@ -30,7 +31,7 @@ it("discards staged toggles on Escape", async () => {
 });
 it("validates fields and saves toggles, trimmed strings, and zero ratio", async () => {
   const menu = ui(
-    [0, 8, 8, 9, 10, 10, 10, 12],
+    [0, 8, 8, 9, 10, 10, 10, 14],
     [" ", " model ", " provider ", "", "Infinity", "0"],
   );
   const save = vi.fn();
@@ -46,15 +47,54 @@ it("validates fields and saves toggles, trimmed strings, and zero ratio", async 
     cacheWriteReadRatio: 0,
   });
 });
+it("picks a separate consolidator model from OMP models and toggles pre-compaction consolidation", async () => {
+  const menu = ui([
+    11, // open Consolidator model picker
+    2, // pick 2nd OMP model ("openai/gpt-5-mini") — index 0 is default, 1 is 1st model, 2 is 2nd model
+    12, // toggle Consolidate before compaction -> ON
+    14, // Save and close
+  ]);
+  const save = vi.fn();
+  await openForgeSettings(menu, DEFAULT_CONFIG, save, {
+    listModels: () => [
+      { value: "anthropic/claude-haiku-4-5", label: "anthropic/claude-haiku-4-5 (Haiku 4.5)" },
+      { value: "openai/gpt-5-mini", label: "openai/gpt-5-mini (GPT-5 Mini)" },
+    ],
+  });
+  expect(save).toHaveBeenCalledWith({
+    ...DEFAULT_CONFIG,
+    consolidatorModel: "openai/gpt-5-mini",
+    consolidateBeforeCompaction: true,
+  });
+});
+it("validates manual consolidator model entry and allows resetting to default", async () => {
+  const menu = ui(
+    [
+      11, 1, // open Consolidator model -> manual entry (index 1 when listModels empty)
+      11, 1, // retry manual entry with valid provider/model
+      11, 0, // reset to default
+      11, 1, // enter valid provider/model again
+      14, // Save and close
+    ],
+    ["missing-slash", "anthropic/claude-haiku-4-5", " google/gemini-2.5-flash "],
+  );
+  const save = vi.fn();
+  await openForgeSettings(menu, DEFAULT_CONFIG, save);
+  expect(menu.notify.mock.calls.filter((c) => c[1] === "error")).toHaveLength(1);
+  expect(save).toHaveBeenCalledWith({
+    ...DEFAULT_CONFIG,
+    consolidatorModel: "google/gemini-2.5-flash",
+  });
+});
 it("stages reset and reports failed saves", async () => {
   const save = vi.fn();
   await openForgeSettings(
-    ui([11, 12]),
+    ui([13, 14]),
     { ...DEFAULT_CONFIG, actionFusion: false },
     save,
   );
   expect(save).toHaveBeenCalledWith(DEFAULT_CONFIG);
-  const menu = ui([12, undefined]);
+  const menu = ui([14, undefined]);
   await openForgeSettings(menu, DEFAULT_CONFIG, () => {
     throw new Error("read only");
   });
@@ -168,5 +208,125 @@ it("runtime and modal agree on numeric counterexamples and preserve zero opt-out
   } finally {
     __setTestConfigDir(undefined);
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("loads global and project-local consolidatorModel and consolidateBeforeCompaction settings", () => {
+  const globalDir = mkdtempSync(join(tmpdir(), "forge-global-"));
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-project-"));
+  try {
+    saveSettings(
+      join(globalDir, "context-forge.json"),
+      {
+        ...DEFAULT_CONFIG,
+        consolidatorModel: "anthropic/claude-haiku-4-5",
+        consolidateBeforeCompaction: true,
+      },
+      undefined,
+    );
+    const fromGlobal = loadContextForgeConfig(projectDir, globalDir, true);
+    expect(fromGlobal.consolidatorModel).toBe("anthropic/claude-haiku-4-5");
+    expect(fromGlobal.consolidateBeforeCompaction).toBe(true);
+
+    saveSettings(
+      join(projectDir, CONFIG_DIR_NAME, "context-forge.json"),
+      {
+        ...DEFAULT_CONFIG,
+        consolidatorModel: "openai/gpt-5-mini",
+        consolidateBeforeCompaction: false,
+      },
+      undefined,
+    );
+    // Untrusted project ignores local override and keeps global
+    const untrusted = loadContextForgeConfig(projectDir, globalDir, false);
+    expect(untrusted.consolidatorModel).toBe("anthropic/claude-haiku-4-5");
+    expect(untrusted.consolidateBeforeCompaction).toBe(true);
+
+    // Trusted project applies local override
+    const trusted = loadContextForgeConfig(projectDir, globalDir, true);
+    expect(trusted.consolidatorModel).toBe("openai/gpt-5-mini");
+    expect(trusted.consolidateBeforeCompaction).toBe(false);
+
+    // Invalid consolidatorModel throws
+    writeFileSync(
+      join(projectDir, CONFIG_DIR_NAME, "context-forge.json"),
+      JSON.stringify({ version: 1, consolidatorModel: "no-slash" }),
+    );
+    expect(() => loadContextForgeConfig(projectDir, globalDir, true)).toThrow(
+      "consolidatorModel",
+    );
+  } finally {
+    rmSync(globalDir, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+it("blackhole settings exposes consolidator model picker and consolidateBeforeCompaction in global and project scopes", async () => {
+  const { config } = await import(
+    "./blackhole/src/pi-base/blackhole-settings.ts"
+  );
+  const { DEFAULTS, loadUnifiedConfig, __setTestConfigDir } = await import(
+    "./blackhole/src/core/unified-config.ts"
+  );
+  const { mkdirSync } = await import("node:fs");
+
+  const globalRoot = mkdtempSync(join(tmpdir(), "bh-global-"));
+  const projectRoot = mkdtempSync(join(tmpdir(), "bh-project-"));
+  const globalDir = join(globalRoot, "pi-blackhole");
+  mkdirSync(globalDir, { recursive: true });
+  try {
+    __setTestConfigDir(globalRoot);
+    const { opts } = config as unknown as {
+      opts: {
+        fields: (value: typeof DEFAULTS) => Array<{ key: string; type: string; value: unknown }>;
+        validate: (raw: Record<string, unknown>) => typeof DEFAULTS;
+      };
+    };
+
+    const fields = opts.fields(DEFAULTS);
+    expect(fields.find((f) => f.key === "model")?.type).toBe("model");
+    expect(fields.find((f) => f.key === "consolidateBeforeCompaction")?.type).toBe("boolean");
+
+    // Modal ModelValue converts to OmModelConfig and clears cleanly on "(session model)"
+    const converted = opts.validate({
+      model: { id: "anthropic/claude-haiku-4-5", thinking: "low" },
+      consolidateBeforeCompaction: true,
+    });
+    expect(converted.model).toEqual({
+      provider: "anthropic",
+      id: "claude-haiku-4-5",
+      thinking: "low",
+    });
+    expect(converted.consolidateBeforeCompaction).toBe(true);
+
+    const cleared = opts.validate({ model: { id: "", thinking: "medium" } });
+    expect(cleared.model).toBeUndefined();
+
+    // Global + project-local persistence round-trip via ConfigManager.save + loadUnifiedConfig
+    config.save(converted, "global", projectRoot, globalDir);
+    const loadedGlobal = loadUnifiedConfig(projectRoot);
+    expect(loadedGlobal.model).toEqual({
+      provider: "anthropic",
+      id: "claude-haiku-4-5",
+      thinking: "low",
+    });
+    expect(loadedGlobal.consolidateBeforeCompaction).toBe(true);
+
+    const projectConfig = opts.validate({
+      model: { id: "openai/gpt-5-mini", thinking: "minimal" },
+      consolidateBeforeCompaction: false,
+    });
+    config.save(projectConfig, "project", projectRoot, globalDir);
+    const loadedLocal = loadUnifiedConfig(projectRoot);
+    expect(loadedLocal.model).toEqual({
+      provider: "openai",
+      id: "gpt-5-mini",
+      thinking: "minimal",
+    });
+    expect(loadedLocal.consolidateBeforeCompaction).toBe(false);
+  } finally {
+    __setTestConfigDir(undefined);
+    rmSync(globalRoot, { recursive: true, force: true });
+    rmSync(projectRoot, { recursive: true, force: true });
   }
 });

@@ -242,11 +242,19 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
           ? ["── Mode ──", "Passive: automatic memory workers and auto-compaction disabled", ""]
           : [];
 
+      const consolidatorModelLabel =
+        runtime.config.model?.provider && runtime.config.model?.id
+          ? `${runtime.config.model.provider}/${runtime.config.model.id}` +
+            (runtime.config.model.thinking ? ` (${runtime.config.model.thinking})` : "")
+          : "(session model)";
+
       const lines = [
         ...passiveLines,
         "── Memory ──",
         observationLine,
         reflectionLine,
+        `Consolidator:   ${consolidatorModelLabel}`,
+        `Pre-compact OM: ${runtime.config.consolidateBeforeCompaction ? "ON (full Observer → Reflector → Dropper before compaction)" : "OFF"}`,
         "",
         "── Pipeline ──",
         "Transcript accumulated since last run. Triggers when exceeding threshold.",

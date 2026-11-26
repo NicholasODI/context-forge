@@ -4,6 +4,7 @@ import { autoCompactThreshold } from "./model-budget.js";
 import type { Runtime } from "./runtime.js";
 import { debugLog } from "./debug-log.js";
 import { RETRYABLE_ERROR_RE } from "./retryable-error.js";
+import { consolidateBeforeCompaction } from "./consolidation.js";
 import {
   compactInlineAtTurnBoundary,
   InlineCompactionUnavailableError,
@@ -170,7 +171,7 @@ export function registerCompactionTrigger(
 
   pi.on("agent_end", (event: any, ctx: any) => {
     try {
-      handleAgentEnd(event, ctx, runtime);
+      handleAgentEnd(pi, event, ctx, runtime);
     } catch (error) {
       if (isStaleExtensionContextError(error)) return;
       throw error;
@@ -184,7 +185,7 @@ export function registerCompactionTrigger(
   // over before compaction had a chance to run).
   pi.on("turn_end", async (_event: any, ctx: any) => {
     try {
-      await handleTurnEnd(ctx, runtime, inlineCompact);
+      await handleTurnEnd(pi, ctx, runtime, inlineCompact);
     } catch (error) {
       if (isStaleExtensionContextError(error)) return;
       throw error;
@@ -193,6 +194,7 @@ export function registerCompactionTrigger(
 }
 
 async function handleTurnEnd(
+  pi: ExtensionAPI,
   ctx: any,
   runtime: Runtime,
   inlineCompact: InlineCompaction,
@@ -291,6 +293,25 @@ async function handleTurnEnd(
 
   runtime.compactInFlight = true;
 
+  if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+    try {
+      await consolidateBeforeCompaction(pi, runtime, ctx, { signal: ctx.signal });
+    } catch (error) {
+      if (isStaleExtensionContextError(error)) {
+        runtime.compactInFlight = false;
+        throw error;
+      }
+      dbg("compaction_trigger.turn_end.pre_compact_consolidation_error", {
+        message: getErrorMessage(error),
+      });
+    }
+    if (ctx.signal?.aborted === true) {
+      runtime.compactInFlight = false;
+      dbg("compaction_trigger.turn_end.skip", { reason: "active_run_aborted" });
+      return;
+    }
+  }
+
   if (inlineMode) {
     try {
       await inlineCompact(ctx.sessionManager);
@@ -383,7 +404,7 @@ async function handleTurnEnd(
   });
 }
 
-function handleAgentEnd(event: any, ctx: any, runtime: Runtime): void {
+function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime): void {
   runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
   // Reset the info gate — allow one notification during agent_end.
   runtime.resetInfoGate();
@@ -630,6 +651,18 @@ function handleAgentEnd(event: any, ctx: any, runtime: Runtime): void {
           threshold,
         });
         return;
+      }
+
+      if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+        await consolidateBeforeCompaction(pi, runtime, ctx, { signal });
+        if (signal.aborted) {
+          runtime.compactInFlight = false;
+          runtime.autoCompactionController = null;
+          dbg("compaction_trigger.microtask.bail", {
+            reason: "aborted_agent_start",
+          });
+          return;
+        }
       }
 
       dbg("compaction_trigger.microtask.calling_compact", {});

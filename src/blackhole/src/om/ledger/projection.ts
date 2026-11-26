@@ -34,6 +34,8 @@ export type CompactionProjectionConfig = {
   observationsPoolMaxTokens: number;
   reflectionsPoolMaxTokens?: number;
   fullFoldAlways?: boolean;
+  /** When true (pre-compaction full consolidation ran), include OM entries up to the branch tip. */
+  includeTipCoverage?: boolean;
   taskQuery?: string;
 };
 
@@ -231,9 +233,10 @@ export function buildCompactionProjection(
   config: CompactionProjectionConfig,
 ): CompactionProjection {
   const compactAll = firstKeptEntryId === "";
-  const outputBoundary = compactAll ? tipBoundary() : entryBoundary(firstKeptEntryId);
+  const includeTip = compactAll || config.includeTipCoverage === true;
+  const outputBoundary = includeTip ? tipBoundary() : entryBoundary(firstKeptEntryId);
   const fullFoldBoundaryId = latestFullFoldBoundaryId(entries);
-  const maintenanceBoundary = compactAll
+  const maintenanceBoundary = includeTip
     ? tipBoundary()
     : fullFoldBoundaryId
       ? entryBoundary(fullFoldBoundaryId)
@@ -253,7 +256,9 @@ export function buildCompactionProjection(
     0,
   );
   const fullFold = observationTokens >= config.observationsPoolMaxTokens;
-  let projection = fullFold ? fullProjection(entries, firstKeptEntryId) : normalProjection;
+  let projection = fullFold
+    ? fullProjection(entries, includeTip ? undefined : firstKeptEntryId)
+    : normalProjection;
 
   // A pin/correction is current control state, not raw history to summarize.
   // Honor it even when its event was appended after the selected source cut.

@@ -174,9 +174,22 @@ function nextRuntimeInstanceId(): string {
   return `inst-${++runtimeInstanceCounter}`;
 }
 
+export interface ForgeConfigOverrides {
+  readonly consolidatorModel?: { provider: string; id: string };
+  readonly consolidateBeforeCompaction?: boolean;
+  readonly observationalMemoryEnabled?: boolean;
+}
+
 export class Runtime {
   config: Config = { ...DEFAULTS };
   configLoaded = false;
+  private baseConfig: Config = { ...DEFAULTS };
+  private forgeOverrides: ForgeConfigOverrides = {};
+  /** Tracks the branch source tip already consolidated by pre-compaction consolidation
+   *  so an immediate follow-up `session_before_compact` hook does not re-run the pipeline. */
+  lastPreCompactionConsolidation:
+    | { sessionId: string; lastSourceEntryId: string | undefined }
+    | undefined;
   /**
    * Stable per-process identity for this extension instance. Correlates
    * registration → trigger → launch events in the debug log, and surfaces
@@ -307,7 +320,11 @@ export class Runtime {
     // A new session gets a fresh notice collection so the previous session's
     // dedupe cannot suppress the new session's first announcements. Same-id
     // repeats keep the collection (per-run reset stays on agent_start).
-    if (this.sessionIdentity !== sessionIdentity) { this.resetNoticeGate(); this.lastMemoryContext = undefined; }
+    if (this.sessionIdentity !== sessionIdentity) {
+      this.resetNoticeGate();
+      this.lastMemoryContext = undefined;
+      this.lastPreCompactionConsolidation = undefined;
+    }
     if (this.sessionIdentity !== undefined && this.sessionIdentity !== sessionIdentity) {
       this.lifecycleController.abort();
       this.lifecycleController = new AbortController();
@@ -551,10 +568,46 @@ export class Runtime {
     return this.tryEmitInfo(hasUI, ui, message);
   }
 
+  private applyForgeOverrides(base: Config): Config {
+    const next: Config = { ...base };
+    if (this.forgeOverrides.consolidatorModel) {
+      const { provider, id } = this.forgeOverrides.consolidatorModel;
+      next.model = {
+        ...(base.model?.thinking ? { thinking: base.model.thinking } : {}),
+        provider,
+        id,
+      };
+    }
+    if (this.forgeOverrides.observationalMemoryEnabled === false) {
+      next.consolidateBeforeCompaction = false;
+    } else if (this.forgeOverrides.consolidateBeforeCompaction === true) {
+      next.consolidateBeforeCompaction = true;
+    }
+    return next;
+  }
+
+  /**
+   * Apply a freshly loaded base blackhole config while preserving active
+   * context-forge overrides (consolidatorModel, consolidateBeforeCompaction).
+   */
+  applyLoadedConfig(loaded: Config): void {
+    this.baseConfig = loaded;
+    this.config = this.applyForgeOverrides(loaded);
+    this.configLoaded = true;
+  }
+
+  /**
+   * Set context-forge-level overrides from context-forge.json (global or local).
+   * Takes effect immediately on the active config without requiring a restart.
+   */
+  setForgeOverrides(overrides: ForgeConfigOverrides): void {
+    this.forgeOverrides = { ...overrides };
+    this.config = this.applyForgeOverrides(this.configLoaded ? this.baseConfig : this.config);
+  }
+
   ensureConfig(cwd: string, warn?: (message: string) => void): void {
     if (this.configLoaded) return;
-    this.config = loadConfig(cwd, warn);
-    this.configLoaded = true;
+    this.applyLoadedConfig(loadConfig(cwd, warn));
     expireCooldowns();
   }
 

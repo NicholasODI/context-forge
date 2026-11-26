@@ -19,6 +19,21 @@ import {
 } from "./extensions/evidence-preserving-reducer/config.ts";
 
 export const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
+export const DEFAULT_CONSOLIDATOR_MODEL = "default";
+
+export function parseConsolidatorModel(
+  value: unknown,
+): { provider: string; id: string } | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === DEFAULT_CONSOLIDATOR_MODEL) return undefined;
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+  const provider = trimmed.slice(0, slash).trim();
+  const id = trimmed.slice(slash + 1).trim();
+  if (!provider || !id) return undefined;
+  return { provider, id };
+}
 
 export interface ContextForgeConfig {
   readonly version: 1;
@@ -35,6 +50,9 @@ export interface ContextForgeConfig {
   readonly vccCompaction: boolean;
   readonly unifiedRecall: boolean;
   readonly projectMemory: boolean;
+  // Observational memory consolidator & pre-compaction overrides
+  readonly consolidatorModel: string;
+  readonly consolidateBeforeCompaction: boolean;
 }
 
 export const FORGE_FIELDS = [
@@ -104,6 +122,18 @@ export const FORGE_FIELDS = [
     kind: "number",
     defaultValue: DEFAULT_CACHE_WRITE_READ_RATIO,
   },
+  {
+    key: "consolidatorModel",
+    label: "Consolidator model",
+    kind: "model",
+    defaultValue: DEFAULT_CONSOLIDATOR_MODEL,
+  },
+  {
+    key: "consolidateBeforeCompaction",
+    label: "Consolidate before compaction",
+    kind: "boolean",
+    defaultValue: false,
+  },
 ] as const;
 export type ForgeField = (typeof FORGE_FIELDS)[number];
 export const DEFAULT_CONFIG: ContextForgeConfig = Object.freeze({
@@ -119,6 +149,12 @@ const CONFIG_KEYS = new Set<string>([
 
 export function validForgeValue(field: ForgeField, value: unknown): boolean {
   if (field.kind === "boolean") return typeof value === "boolean";
+  if (field.kind === "model")
+    return (
+      typeof value === "string" &&
+      (value.trim() === DEFAULT_CONSOLIDATOR_MODEL ||
+        parseConsolidatorModel(value) !== undefined)
+    );
   if (field.kind === "string")
     return typeof value === "string" && value.trim().length > 0;
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -174,9 +210,11 @@ export function loadContextForgeConfig(
       const expected =
         field.kind === "number"
           ? "a finite non-negative number"
-          : field.kind === "string"
-            ? "a non-empty string"
-            : "boolean";
+          : field.kind === "model"
+            ? `"${DEFAULT_CONSOLIDATOR_MODEL}" or "provider/model"`
+            : field.kind === "string"
+              ? "a non-empty string"
+              : "boolean";
       throw new Error(
         `context-forge config ${field.key} must be ${expected}: ${path}`,
       );

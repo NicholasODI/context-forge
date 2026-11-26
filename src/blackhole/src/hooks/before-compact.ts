@@ -23,6 +23,7 @@ import { buildAppendOnlyDetails, coverageForMessages } from "../core/compaction-
 import { getModelProvider, matchesSkippedProvider } from "../core/provider-skip.js";
 import type { PiVccCompactionDetails } from "../details";
 import { buildCompactionProjection, renderSummary, PinnedMemoryOverflowError } from "../om/ledger/index.js";
+import { consolidateBeforeCompaction, flushPendingOMToBranch } from "../om/consolidation.js";
 import type { Runtime } from "../om/runtime.js";
 import { OM_SELECTION, type SelectionSnapshot } from "../om/ledger/diagnostics.js";
 import { debugLog } from "../om/debug-log.js";
@@ -718,6 +719,34 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
     let omDetails: Record<string, unknown> | undefined;
     let omHasContent = false;
     let selection: SelectionSnapshot | undefined;
+    let projectionBranchEntries = branchEntries as any[];
+    if (omRuntime.config.memory !== false && omRuntime.config.consolidateBeforeCompaction) {
+      const preResult = await consolidateBeforeCompaction(pi, omRuntime, ctx as any, {
+        signal: event.signal,
+      });
+      if (event.signal?.aborted) {
+        omRuntime.lastCompactCancelled = true;
+        return { cancel: true };
+      }
+      if (preResult.outcome === "ran") {
+        if (omRuntime.config.compaction === "manual" || omRuntime.config.noAutoCompact === true) {
+          try {
+            const sid = ctx.sessionManager?.getSessionId?.();
+            if (sid) flushPendingOMToBranch(pi, sid);
+          } catch {
+            // Best-effort: fallback to existing branch entries.
+          }
+        }
+        try {
+          const freshBranch = ctx.sessionManager?.getBranch?.();
+          if (Array.isArray(freshBranch) && freshBranch.length > 0) {
+            projectionBranchEntries = freshBranch as any[];
+          }
+        } catch {
+          // Stale or mock sessionManager — keep snapshotted branchEntries.
+        }
+      }
+    }
     trace("before_compact.om_injection", {
       memoryEnabled: omRuntime.config.memory !== false,
     });
@@ -726,10 +755,11 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
         observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens,
         reflectionsPoolMaxTokens: omRuntime.config.reflectionsPoolMaxTokens ?? DEFAULTS.reflectionsPoolMaxTokens,
         fullFoldAlways: omRuntime.config.fullFoldAlways,
+        includeTipCoverage: omRuntime.config.consolidateBeforeCompaction === true,
         taskQuery: extractSection(summary, "Session Goal").slice(0, 2000),
       };
       let projection;
-      try { projection = buildCompactionProjection(branchEntries as any[], firstKeptEntryId, selectionConfig); } catch (error) {
+      try { projection = buildCompactionProjection(projectionBranchEntries, firstKeptEntryId, selectionConfig); } catch (error) {
         if (!(error instanceof PinnedMemoryOverflowError)) throw error;
         ctx.ui.notify(error.message, "warning");
         return { cancel: true };

@@ -24,6 +24,7 @@ import {
   DEFAULTS,
   normalizeCacheRetention,
   normalizeThresholdKnobs,
+  parseModelConfig,
   type UnifiedConfig,
 } from "../core/unified-config.ts";
 import { effectivePresets } from "../om/model-budget.ts";
@@ -195,6 +196,37 @@ export const config = new ConfigManager<UnifiedConfig>({
       valueDescriptions: {
         on: "Active — OM workers + content injection enabled",
         off: "Suspended — OM disabled",
+      },
+    },
+    {
+      key: "model",
+      type: "model",
+      label: "Consolidator model",
+      description:
+        "Separate model from OMP's model list for OM consolidation workers (observer, reflector, dropper). Pick (session model) to use the active session model.",
+      value:
+        cfg.model?.provider && cfg.model?.id
+          ? {
+              id: `${cfg.model.provider}/${cfg.model.id}`,
+              ...(cfg.model.thinking ? { thinking: cfg.model.thinking } : {}),
+            }
+          : {
+              id: "",
+              ...(cfg.model?.thinking ? { thinking: cfg.model.thinking } : {}),
+            },
+      default: { id: "" },
+      sessionLabel: "(session model)",
+    },
+    {
+      key: "consolidateBeforeCompaction",
+      type: "boolean",
+      label: "Consolidate before compaction",
+      description:
+        "Run full observational memory consolidation (Observer, Reflector, Dropper) over all remaining tokens immediately before every compaction.",
+      value: cfg.consolidateBeforeCompaction,
+      valueDescriptions: {
+        on: "Enabled — fully consolidates remaining tokens before blackhole compacts",
+        off: "Disabled — compaction uses observations already recorded on normal thresholds",
       },
     },
     {
@@ -420,6 +452,18 @@ export const config = new ConfigManager<UnifiedConfig>({
       parsed.cacheRetention = cacheRetention;
     } else {
       delete parsed.cacheRetention;
+    }
+
+    // ── model: convert modal ModelValue ({ id: "provider/model", thinking }) to OmModelConfig ──
+    const normalizedModel = parseModelConfig(parsed.model);
+    if (normalizedModel) {
+      parsed.model = normalizedModel;
+    } else {
+      delete parsed.model;
+    }
+
+    if (typeof parsed.consolidateBeforeCompaction !== "boolean") {
+      delete parsed.consolidateBeforeCompaction;
     }
 
     // ── Merge with defaults ──

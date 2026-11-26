@@ -273,6 +273,8 @@ export interface UnifiedConfig {
   passive?: boolean;
   /** Enables observational memory (workers + content injection). Set to false for pi-vcc only. */
   memory: boolean;
+  /** Fully consolidate remaining tokens (Observer, Reflector, Dropper) before every compaction. */
+  consolidateBeforeCompaction: boolean;
   /** Writes debug JSONL to agent directory. */
   debugLog: boolean;
   /** Show the blackhole footer status bar (token gauges + worker events). */
@@ -336,8 +338,10 @@ export const DEFAULTS: UnifiedConfig = {
   providerIdleTimeoutMs: undefined,
   workerAttemptTimeoutMs: 600_000,
   cacheRetention: undefined,
+  model: undefined,
 
   memory: true,
+  consolidateBeforeCompaction: false,
   debugLog: false,
   statusBar: true,
   showWorkerNotifications: true,
@@ -435,9 +439,38 @@ function nonNegativeInt(v: unknown): number | undefined {
   return Number.isInteger(v) && typeof v === "number" && v >= 0 ? v : undefined;
 }
 
-function parseModel(v: unknown): OmModelConfig | undefined {
+export function parseModelConfig(v: unknown): OmModelConfig | undefined {
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    const slash = trimmed.indexOf("/");
+    if (slash > 0 && slash < trimmed.length - 1) {
+      const provider = trimmed.slice(0, slash).trim();
+      const id = trimmed.slice(slash + 1).trim();
+      if (provider && id) return { provider, id };
+    }
+    return undefined;
+  }
   if (!isRecord(v)) return undefined;
-  const provider = nonEmptyString(v.provider);
+  const rawProvider = nonEmptyString(v.provider);
+  // Modal `type: "model"` values carry `{ id: "provider/model", thinking? }`
+  // (or `{ id: "" }` for "(session model)") without a separate `provider` key.
+  if (!rawProvider && typeof v.id === "string") {
+    const trimmed = v.id.trim();
+    if (trimmed === "") return undefined;
+    const slash = trimmed.indexOf("/");
+    if (slash <= 0 || slash === trimmed.length - 1) return undefined;
+    const provider = trimmed.slice(0, slash).trim();
+    const id = trimmed.slice(slash + 1).trim();
+    if (!provider || !id) return undefined;
+    const model: OmModelConfig = { provider, id };
+    if (isThinkingLevel(v.thinking)) model.thinking = v.thinking;
+    const cooldown = nonNegativeInt(v.cooldownHours);
+    if (cooldown !== undefined) model.cooldownHours = cooldown;
+    const ctxWindow = positiveInt(v.contextWindow);
+    if (ctxWindow !== undefined) model.contextWindow = ctxWindow;
+    return model;
+  }
+  const provider = rawProvider;
   const id = nonEmptyString(v.id);
   const thinkingValid = isThinkingLevel(v.thinking);
   // Thinking-only modifier: no identity, but a valid thinking level.
@@ -460,6 +493,10 @@ function parseModel(v: unknown): OmModelConfig | undefined {
   const ctxWindow = positiveInt(v.contextWindow);
   if (ctxWindow !== undefined) model.contextWindow = ctxWindow;
   return model;
+}
+
+function parseModel(v: unknown): OmModelConfig | undefined {
+  return parseModelConfig(v);
 }
 
 function parseModelArray(v: unknown): OmModelConfig[] | undefined {
@@ -619,6 +656,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.noAutoCompact === "boolean") c.noAutoCompact = raw.noAutoCompact;
   if (typeof raw.passive === "boolean") c.passive = raw.passive;
   if (typeof raw.memory === "boolean") c.memory = raw.memory;
+  if (typeof raw.consolidateBeforeCompaction === "boolean")
+    c.consolidateBeforeCompaction = raw.consolidateBeforeCompaction;
   if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
   if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
   if (typeof raw.statusBar === "boolean") c.statusBar = raw.statusBar;
