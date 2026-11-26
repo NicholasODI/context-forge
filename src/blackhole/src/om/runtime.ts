@@ -10,6 +10,7 @@
  * - markConsolidationError sets 30s retry gate for failed runs.
  */
 import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
+import type { ConsolidateBeforeCompactionMode } from "../core/unified-config.js";
 import type { CompactionStats } from "../hooks/before-compact.js";
 import {
   isCooldownActive,
@@ -176,7 +177,7 @@ function nextRuntimeInstanceId(): string {
 
 export interface ForgeConfigOverrides {
   readonly consolidatorModel?: { provider: string; id: string };
-  readonly consolidateBeforeCompaction?: boolean;
+  readonly consolidateBeforeCompaction?: ConsolidateBeforeCompactionMode;
   readonly observationalMemoryEnabled?: boolean;
 }
 
@@ -579,9 +580,12 @@ export class Runtime {
       };
     }
     if (this.forgeOverrides.observationalMemoryEnabled === false) {
-      next.consolidateBeforeCompaction = false;
-    } else if (this.forgeOverrides.consolidateBeforeCompaction === true) {
-      next.consolidateBeforeCompaction = true;
+      next.consolidateBeforeCompaction = "off";
+    } else if (
+      this.forgeOverrides.consolidateBeforeCompaction &&
+      this.forgeOverrides.consolidateBeforeCompaction !== "off"
+    ) {
+      next.consolidateBeforeCompaction = this.forgeOverrides.consolidateBeforeCompaction;
     }
     return next;
   }

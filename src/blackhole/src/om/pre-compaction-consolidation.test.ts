@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Runtime } from "./runtime.ts";
-import { consolidateBeforeCompaction } from "./consolidation.ts";
+import {
+  consolidateBeforeCompaction,
+  registerConsolidationTrigger,
+  triggerConsolidation,
+} from "./consolidation.ts";
 import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION } from "../hooks/before-compact.ts";
+import type { ConsolidateBeforeCompactionMode } from "../core/unified-config.ts";
 import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
@@ -71,8 +76,9 @@ function toolResponse(targetModel: any, toolName: string, args: unknown) {
 }
 
 function makeHarness(opts?: {
-  consolidateBeforeCompaction?: boolean;
+  consolidateBeforeCompaction?: ConsolidateBeforeCompactionMode;
   consolidatorModel?: { provider: string; id: string };
+  observeAfterTokens?: number;
   observationsPoolMaxTokens?: number;
   observationsPoolTargetTokens?: number;
 }) {
@@ -99,21 +105,22 @@ function makeHarness(opts?: {
     },
   ];
 
+  const mode = opts?.consolidateBeforeCompaction ?? "flush";
   const runtime = new Runtime();
   runtime.applyLoadedConfig({
     ...runtime.config,
     // Very high normal thresholds so ordinary consolidation would NOT trigger
-    observeAfterTokens: 999_999,
+    observeAfterTokens: opts?.observeAfterTokens ?? 999_999,
     reflectAfterTokens: 999_999,
     observationsPoolMaxTokens: opts?.observationsPoolMaxTokens ?? 60,
     observationsPoolTargetTokens: opts?.observationsPoolTargetTokens ?? 10,
     dropperPoolFullnessThreshold: 0.9,
-    consolidateBeforeCompaction: opts?.consolidateBeforeCompaction ?? true,
+    consolidateBeforeCompaction: mode,
   });
   if (opts?.consolidatorModel) {
     runtime.setForgeOverrides({
       consolidatorModel: opts.consolidatorModel,
-      consolidateBeforeCompaction: opts?.consolidateBeforeCompaction ?? true,
+      consolidateBeforeCompaction: mode,
     });
   }
   runtime.startSession("precompact-session");
@@ -217,16 +224,53 @@ function makeHarness(opts?: {
 }
 
 describe("pre-compaction full consolidation & separate consolidator model", () => {
-  it("skips when consolidateBeforeCompaction is disabled", async () => {
-    const h = makeHarness({ consolidateBeforeCompaction: false });
+  it("skips when consolidateBeforeCompaction is off", async () => {
+    const h = makeHarness({ consolidateBeforeCompaction: "off" });
     const res = await consolidateBeforeCompaction(h.pi, h.runtime, h.ctx);
     expect(res).toEqual({ outcome: "skipped", reason: "disabled" });
     expect(h.streamSimple).not.toHaveBeenCalled();
   });
 
+  it("bypasses automatic background triggers in 'only' mode while still allowing manual and pre-compaction consolidation", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      observeAfterTokens: 1, // well below branch token count so normal trigger would fire
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    const handlers: Record<string, (event: any, ctx: any) => void> = {};
+    h.pi.on.mockImplementation((name: string, fn: any) => {
+      handlers[name] = fn;
+    });
+    registerConsolidationTrigger(h.pi, h.runtime, {
+      observationalMemory: true,
+      vccCompaction: true,
+    });
+
+    // Automatic background triggers are bypassed in "only" mode
+    handlers.agent_start?.({}, h.ctx);
+    handlers.turn_end?.({}, h.ctx);
+    await Promise.resolve();
+    expect(h.runtime.consolidationInFlight).toBe(false);
+    expect(h.streamSimple).not.toHaveBeenCalled();
+
+    // Explicit manual /blackhole-consolidate still launches when due
+    const manual = triggerConsolidation(h.pi, h.runtime, h.ctx);
+    expect(manual.outcome).toBe("launched");
+    await h.runtime.consolidationPromise;
+    expect(h.streamSimple).toHaveBeenCalledTimes(1);
+
+    // Pre-compaction consolidation still runs full remaining stages (Reflector + Dropper)
+    const pre = await consolidateBeforeCompaction(h.pi, h.runtime, h.ctx);
+    expect(pre).toEqual({ outcome: "ran" });
+    expect(h.modelsUsed.map((m) => m.stage)).toEqual(["observer", "reflector", "dropper"]);
+  });
+
   it("fully consolidates remaining below-threshold tokens across Observer, Reflector, and Dropper using the separate consolidator model", async () => {
     const h = makeHarness({
-      consolidateBeforeCompaction: true,
+      consolidateBeforeCompaction: "flush",
       consolidatorModel: {
         provider: consolidatorModel.provider,
         id: consolidatorModel.id,
@@ -266,7 +310,7 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
   });
 
   it("awaits an in-flight consolidation run before running pre-compaction consolidation", async () => {
-    const h = makeHarness({ consolidateBeforeCompaction: true });
+    const h = makeHarness({ consolidateBeforeCompaction: "flush" });
     let releaseInFlight!: () => void;
     let inFlightDone = false;
     h.runtime.consolidationInFlight = true;
@@ -292,7 +336,7 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
 
   it("before-compact hook consolidates remaining tokens and includes fresh tip-covered OM entries in the compaction summary", async () => {
     const h = makeHarness({
-      consolidateBeforeCompaction: true,
+      consolidateBeforeCompaction: "only",
       consolidatorModel: {
         provider: consolidatorModel.provider,
         id: consolidatorModel.id,
@@ -335,30 +379,30 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     const runtime = new Runtime();
     runtime.setForgeOverrides({
       consolidatorModel: { provider: "openai", id: "gpt-5-mini" },
-      consolidateBeforeCompaction: true,
+      consolidateBeforeCompaction: "only",
     });
     runtime.applyLoadedConfig({
       ...runtime.config,
       model: { provider: "anthropic", id: "claude-haiku-4-5", thinking: "low" },
-      consolidateBeforeCompaction: false,
+      consolidateBeforeCompaction: "off",
     });
     expect(runtime.config.model).toEqual({
       provider: "openai",
       id: "gpt-5-mini",
       thinking: "low",
     });
-    expect(runtime.config.consolidateBeforeCompaction).toBe(true);
+    expect(runtime.config.consolidateBeforeCompaction).toBe("only");
 
     // Clearing consolidatorModel override restores the blackhole config model
     runtime.setForgeOverrides({
       consolidatorModel: undefined,
-      consolidateBeforeCompaction: false,
+      consolidateBeforeCompaction: "off",
     });
     expect(runtime.config.model).toEqual({
       provider: "anthropic",
       id: "claude-haiku-4-5",
       thinking: "low",
     });
-    expect(runtime.config.consolidateBeforeCompaction).toBe(false);
+    expect(runtime.config.consolidateBeforeCompaction).toBe("off");
   });
 });

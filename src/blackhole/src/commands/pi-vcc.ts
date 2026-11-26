@@ -21,6 +21,7 @@ import {
   getCompactionIneligibility,
   type CompactionIneligibility,
 } from "../om/inline-compaction.ts";
+import { isPreCompactionConsolidationEnabled } from "../core/unified-config.ts";
 
 /**
  * One message per host refusal, shared by the pre-check and the onError
@@ -179,7 +180,10 @@ export const registerPiVccCommand = (pi: ExtensionAPI, runtime: Runtime) => {
       // Optional pre-compaction full observational memory consolidation
       // (Observer → Reflector → Dropper over all remaining tokens). Runs before
       // manual-mode pending flush and outside session_before_compact's timeout.
-      if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+      if (
+        isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
+        runtime.config.memory !== false
+      ) {
         await consolidateBeforeCompaction(pi, runtime, ctx as any);
       }
 

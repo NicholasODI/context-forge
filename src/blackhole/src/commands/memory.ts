@@ -248,13 +248,20 @@ export function registerMemoryCommand(pi: ExtensionAPI, runtime: Runtime): void 
             (runtime.config.model.thinking ? ` (${runtime.config.model.thinking})` : "")
           : "(session model)";
 
+      const preCompactStatus =
+        runtime.config.consolidateBeforeCompaction === "only"
+          ? "ONLY (background triggers bypassed; full Observer → Reflector → Dropper before compaction)"
+          : runtime.config.consolidateBeforeCompaction === "flush"
+            ? "FLUSH (background triggers active + full Observer → Reflector → Dropper before compaction)"
+            : "OFF";
+
       const lines = [
         ...passiveLines,
         "── Memory ──",
         observationLine,
         reflectionLine,
         `Consolidator:   ${consolidatorModelLabel}`,
-        `Pre-compact OM: ${runtime.config.consolidateBeforeCompaction ? "ON (full Observer → Reflector → Dropper before compaction)" : "OFF"}`,
+        `Pre-compact OM: ${preCompactStatus}`,
         "",
         "── Pipeline ──",
         "Transcript accumulated since last run. Triggers when exceeding threshold.",

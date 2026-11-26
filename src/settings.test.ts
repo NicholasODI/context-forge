@@ -47,11 +47,12 @@ it("validates fields and saves toggles, trimmed strings, and zero ratio", async 
     cacheWriteReadRatio: 0,
   });
 });
-it("picks a separate consolidator model from OMP models and toggles pre-compaction consolidation", async () => {
+it("picks a separate consolidator model from OMP models and selects pre-compaction consolidation mode", async () => {
   const menu = ui([
     11, // open Consolidator model picker
     2, // pick 2nd OMP model ("openai/gpt-5-mini") — index 0 is default, 1 is 1st model, 2 is 2nd model
-    12, // toggle Consolidate before compaction -> ON
+    12, // open Consolidate before compaction mode picker
+    2, // pick "only" (0=off, 1=flush, 2=only)
     14, // Save and close
   ]);
   const save = vi.fn();
@@ -64,7 +65,7 @@ it("picks a separate consolidator model from OMP models and toggles pre-compacti
   expect(save).toHaveBeenCalledWith({
     ...DEFAULT_CONFIG,
     consolidatorModel: "openai/gpt-5-mini",
-    consolidateBeforeCompaction: true,
+    consolidateBeforeCompaction: "only",
   });
 });
 it("validates manual consolidator model entry and allows resetting to default", async () => {
@@ -220,32 +221,39 @@ it("loads global and project-local consolidatorModel and consolidateBeforeCompac
       {
         ...DEFAULT_CONFIG,
         consolidatorModel: "anthropic/claude-haiku-4-5",
-        consolidateBeforeCompaction: true,
+        consolidateBeforeCompaction: "only",
       },
       undefined,
     );
     const fromGlobal = loadContextForgeConfig(projectDir, globalDir, true);
     expect(fromGlobal.consolidatorModel).toBe("anthropic/claude-haiku-4-5");
-    expect(fromGlobal.consolidateBeforeCompaction).toBe(true);
+    expect(fromGlobal.consolidateBeforeCompaction).toBe("only");
 
     saveSettings(
       join(projectDir, CONFIG_DIR_NAME, "context-forge.json"),
       {
         ...DEFAULT_CONFIG,
         consolidatorModel: "openai/gpt-5-mini",
-        consolidateBeforeCompaction: false,
+        consolidateBeforeCompaction: "flush",
       },
       undefined,
     );
     // Untrusted project ignores local override and keeps global
     const untrusted = loadContextForgeConfig(projectDir, globalDir, false);
     expect(untrusted.consolidatorModel).toBe("anthropic/claude-haiku-4-5");
-    expect(untrusted.consolidateBeforeCompaction).toBe(true);
+    expect(untrusted.consolidateBeforeCompaction).toBe("only");
 
     // Trusted project applies local override
     const trusted = loadContextForgeConfig(projectDir, globalDir, true);
     expect(trusted.consolidatorModel).toBe("openai/gpt-5-mini");
-    expect(trusted.consolidateBeforeCompaction).toBe(false);
+    expect(trusted.consolidateBeforeCompaction).toBe("flush");
+
+    // Legacy boolean true normalizes to "flush"
+    writeFileSync(
+      join(projectDir, CONFIG_DIR_NAME, "context-forge.json"),
+      JSON.stringify({ version: 1, consolidateBeforeCompaction: true }),
+    );
+    expect(loadContextForgeConfig(projectDir, globalDir, true).consolidateBeforeCompaction).toBe("flush");
 
     // Invalid consolidatorModel throws
     writeFileSync(
@@ -278,26 +286,31 @@ it("blackhole settings exposes consolidator model picker and consolidateBeforeCo
     __setTestConfigDir(globalRoot);
     const { opts } = config as unknown as {
       opts: {
-        fields: (value: typeof DEFAULTS) => Array<{ key: string; type: string; value: unknown }>;
+        fields: (value: typeof DEFAULTS) => Array<{ key: string; type: string; value: unknown; options?: string[] }>;
         validate: (raw: Record<string, unknown>) => typeof DEFAULTS;
       };
     };
 
     const fields = opts.fields(DEFAULTS);
     expect(fields.find((f) => f.key === "model")?.type).toBe("model");
-    expect(fields.find((f) => f.key === "consolidateBeforeCompaction")?.type).toBe("boolean");
+    const preCompactField = fields.find((f) => f.key === "consolidateBeforeCompaction");
+    expect(preCompactField?.type).toBe("enum");
+    expect(preCompactField?.options).toEqual(["off", "flush", "only"]);
 
     // Modal ModelValue converts to OmModelConfig and clears cleanly on "(session model)"
     const converted = opts.validate({
       model: { id: "anthropic/claude-haiku-4-5", thinking: "low" },
-      consolidateBeforeCompaction: true,
+      consolidateBeforeCompaction: "only",
     });
     expect(converted.model).toEqual({
       provider: "anthropic",
       id: "claude-haiku-4-5",
       thinking: "low",
     });
-    expect(converted.consolidateBeforeCompaction).toBe(true);
+    expect(converted.consolidateBeforeCompaction).toBe("only");
+
+    // Legacy boolean normalizes cleanly
+    expect(opts.validate({ consolidateBeforeCompaction: true }).consolidateBeforeCompaction).toBe("flush");
 
     const cleared = opts.validate({ model: { id: "", thinking: "medium" } });
     expect(cleared.model).toBeUndefined();
@@ -310,11 +323,11 @@ it("blackhole settings exposes consolidator model picker and consolidateBeforeCo
       id: "claude-haiku-4-5",
       thinking: "low",
     });
-    expect(loadedGlobal.consolidateBeforeCompaction).toBe(true);
+    expect(loadedGlobal.consolidateBeforeCompaction).toBe("only");
 
     const projectConfig = opts.validate({
       model: { id: "openai/gpt-5-mini", thinking: "minimal" },
-      consolidateBeforeCompaction: false,
+      consolidateBeforeCompaction: "flush",
     });
     config.save(projectConfig, "project", projectRoot, globalDir);
     const loadedLocal = loadUnifiedConfig(projectRoot);
@@ -323,7 +336,7 @@ it("blackhole settings exposes consolidator model picker and consolidateBeforeCo
       id: "gpt-5-mini",
       thinking: "minimal",
     });
-    expect(loadedLocal.consolidateBeforeCompaction).toBe(false);
+    expect(loadedLocal.consolidateBeforeCompaction).toBe("flush");
   } finally {
     __setTestConfigDir(undefined);
     rmSync(globalRoot, { recursive: true, force: true });

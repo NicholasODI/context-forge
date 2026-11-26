@@ -5,6 +5,7 @@ import type { Runtime } from "./runtime.js";
 import { debugLog } from "./debug-log.js";
 import { RETRYABLE_ERROR_RE } from "./retryable-error.js";
 import { consolidateBeforeCompaction } from "./consolidation.js";
+import { isPreCompactionConsolidationEnabled } from "../core/unified-config.js";
 import {
   compactInlineAtTurnBoundary,
   InlineCompactionUnavailableError,
@@ -293,7 +294,10 @@ async function handleTurnEnd(
 
   runtime.compactInFlight = true;
 
-  if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+  if (
+    isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
+    runtime.config.memory !== false
+  ) {
     try {
       await consolidateBeforeCompaction(pi, runtime, ctx, { signal: ctx.signal });
     } catch (error) {
@@ -653,7 +657,10 @@ function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime
         return;
       }
 
-      if (runtime.config.consolidateBeforeCompaction && runtime.config.memory !== false) {
+      if (
+    isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
+    runtime.config.memory !== false
+  ) {
         await consolidateBeforeCompaction(pi, runtime, ctx, { signal });
         if (signal.aborted) {
           runtime.compactInFlight = false;

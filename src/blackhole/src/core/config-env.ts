@@ -27,6 +27,48 @@ export interface EnvParser {
  */
 export const CACHE_RETENTION_VALUES: readonly CacheRetention[] = ["none", "short", "long"];
 
+export type ConsolidateBeforeCompactionMode = "off" | "flush" | "only";
+
+export const CONSOLIDATE_BEFORE_COMPACTION_VALUES: readonly ConsolidateBeforeCompactionMode[] = [
+  "off",
+  "flush",
+  "only",
+];
+
+/**
+ * Normalize a raw `consolidateBeforeCompaction` setting to `"off" | "flush" | "only"`.
+ * Accepts legacy booleans (`true` → `"flush"`, `false` → `"off"`) and case-insensitive strings.
+ */
+export function normalizeConsolidateBeforeCompaction(
+  v: unknown,
+): ConsolidateBeforeCompactionMode | undefined {
+  if (typeof v === "boolean") return v ? "flush" : "off";
+  if (typeof v !== "string") return undefined;
+  const canonical = v.trim().toLowerCase();
+  if (canonical === "off" || canonical === "false" || canonical === "0" || canonical === "no") {
+    return "off";
+  }
+  if (canonical === "flush" || canonical === "true" || canonical === "1" || canonical === "yes" || canonical === "on") {
+    return "flush";
+  }
+  if (canonical === "only" || canonical === "only-before-compaction" || canonical === "pre-compaction-only") {
+    return "only";
+  }
+  return undefined;
+}
+
+export function isPreCompactionConsolidationEnabled(
+  mode: ConsolidateBeforeCompactionMode | boolean | undefined,
+): boolean {
+  return mode === "flush" || mode === "only" || mode === true;
+}
+
+export function isBackgroundConsolidationDeferred(
+  mode: ConsolidateBeforeCompactionMode | boolean | undefined,
+): boolean {
+  return mode === "only";
+}
+
 /**
  * Canonicalize a raw retention value, or `undefined` when it is not one.
  * Case and surrounding whitespace are normalized so all three entry points
@@ -110,7 +152,6 @@ export function applyEnvOverrides<T extends object>(
 export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
   // Booleans
   memory: "PI_BLACKHOLE_MEMORY",
-  consolidateBeforeCompaction: "PI_BLACKHOLE_CONSOLIDATE_BEFORE_COMPACTION",
   debug: "PI_BLACKHOLE_DEBUG",
   debugLog: "PI_BLACKHOLE_DEBUG_LOG",
   sessionFallback: "PI_BLACKHOLE_SESSION_FALLBACK",
@@ -254,6 +295,11 @@ export const DECLARATIVE_ENV_OVERRIDES: Record<string, EnvOverride> = {
         ? (trimmed as "resume" | "pause" | "off")
         : undefined;
     },
+  },
+  // Pre-compaction consolidation mode: off | flush | only (booleans accepted for compatibility).
+  consolidateBeforeCompaction: {
+    var: "PI_BLACKHOLE_CONSOLIDATE_BEFORE_COMPACTION",
+    parse: (raw: string) => normalizeConsolidateBeforeCompaction(raw),
   },
   // Prompt-cache retention preference for the memory workers; an unsupported
   // value leaves the file value (or pi's effective setting) in place.

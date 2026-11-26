@@ -59,7 +59,11 @@ import {
   isObservationChunkPending,
   PendingOMState,
 } from "./pending.js";
-import { isManualMode } from "../core/unified-config.js";
+import {
+  isBackgroundConsolidationDeferred,
+  isManualMode,
+  isPreCompactionConsolidationEnabled,
+} from "../core/unified-config.js";
 import {
   OM_OBSERVATIONS_DROPPED,
   OM_OBSERVATIONS_RECORDED,
@@ -591,7 +595,9 @@ export async function consolidateBeforeCompaction(
         return { outcome: "skipped", reason };
       };
 
-      if (!runtime.config.consolidateBeforeCompaction) return skipPre("disabled");
+      if (!isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction)) {
+        return skipPre("disabled");
+      }
       if (runtime.config.memory === false) return skipPre("memory_false");
       if (matchesSkippedProvider(runtime.config, ctx.model)) return skipPre("provider_skip");
       if (
@@ -773,6 +779,16 @@ function maybeLaunchConsolidationInternal(
   // consolidation so it never touches opaque checkpoints.
   // EXPERIMENTAL compat shim — do not extend; see src/core/provider-skip.ts.
   if (matchesSkippedProvider(runtime.config, ctx.model)) return skip("provider_skip");
+
+  // Pre-compaction-only mode ("only"): bypass automatic background triggers
+  // (agent_start / turn_end) and wait until compaction runs full consolidation.
+  // Explicit manual /blackhole-consolidate (source === "manual") still runs.
+  if (
+    source === "trigger" &&
+    isBackgroundConsolidationDeferred(runtime.config.consolidateBeforeCompaction)
+  ) {
+    return skip("deferred_until_compaction");
+  }
 
   // LEGACY: passive check — only applies when new keys are absent (unmigrated config)
   if (runtime.config.compaction === undefined && runtime.config.compactionEngine === undefined) {

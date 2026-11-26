@@ -17,6 +17,13 @@ import {
   DEFAULT_REDUCER_MODEL,
   DEFAULT_REDUCER_PROVIDER,
 } from "./extensions/evidence-preserving-reducer/config.ts";
+import {
+  CONSOLIDATE_BEFORE_COMPACTION_VALUES,
+  normalizeConsolidateBeforeCompaction,
+  type ConsolidateBeforeCompactionMode,
+} from "./blackhole/src/core/config-env.ts";
+
+export { CONSOLIDATE_BEFORE_COMPACTION_VALUES, type ConsolidateBeforeCompactionMode };
 
 export const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
 export const DEFAULT_CONSOLIDATOR_MODEL = "default";
@@ -52,7 +59,7 @@ export interface ContextForgeConfig {
   readonly projectMemory: boolean;
   // Observational memory consolidator & pre-compaction overrides
   readonly consolidatorModel: string;
-  readonly consolidateBeforeCompaction: boolean;
+  readonly consolidateBeforeCompaction: ConsolidateBeforeCompactionMode;
 }
 
 export const FORGE_FIELDS = [
@@ -131,8 +138,14 @@ export const FORGE_FIELDS = [
   {
     key: "consolidateBeforeCompaction",
     label: "Consolidate before compaction",
-    kind: "boolean",
-    defaultValue: false,
+    kind: "enum",
+    options: CONSOLIDATE_BEFORE_COMPACTION_VALUES,
+    optionLabels: {
+      off: "off — normal background OM only",
+      flush: "flush — normal background OM + full consolidation before compaction",
+      only: "only — bypass background triggers; wait until pre-compaction",
+    },
+    defaultValue: "off" as ConsolidateBeforeCompactionMode,
   },
 ] as const;
 export type ForgeField = (typeof FORGE_FIELDS)[number];
@@ -149,6 +162,18 @@ const CONFIG_KEYS = new Set<string>([
 
 export function validForgeValue(field: ForgeField, value: unknown): boolean {
   if (field.kind === "boolean") return typeof value === "boolean";
+  if (field.kind === "enum") {
+    if (
+      field.key === "consolidateBeforeCompaction" &&
+      typeof value === "boolean"
+    ) {
+      return true;
+    }
+    return (
+      typeof value === "string" &&
+      (field.options as readonly string[]).includes(value)
+    );
+  }
   if (field.kind === "model")
     return (
       typeof value === "string" &&
@@ -210,15 +235,25 @@ export function loadContextForgeConfig(
       const expected =
         field.kind === "number"
           ? "a finite non-negative number"
-          : field.kind === "model"
-            ? `"${DEFAULT_CONSOLIDATOR_MODEL}" or "provider/model"`
-            : field.kind === "string"
-              ? "a non-empty string"
-              : "boolean";
+          : field.kind === "enum"
+            ? `one of ${field.options.join(", ")}`
+            : field.kind === "model"
+              ? `"${DEFAULT_CONSOLIDATOR_MODEL}" or "provider/model"`
+              : field.kind === "string"
+                ? "a non-empty string"
+                : "boolean";
       throw new Error(
         `context-forge config ${field.key} must be ${expected}: ${path}`,
       );
     }
   }
-  return Object.freeze({ ...DEFAULT_CONFIG, ...record }) as ContextForgeConfig;
+  const normalizedPreCompact =
+    record.consolidateBeforeCompaction !== undefined
+      ? normalizeConsolidateBeforeCompaction(record.consolidateBeforeCompaction)
+      : undefined;
+  return Object.freeze({
+    ...DEFAULT_CONFIG,
+    ...record,
+    ...(normalizedPreCompact ? { consolidateBeforeCompaction: normalizedPreCompact } : {}),
+  }) as ContextForgeConfig;
 }

@@ -21,8 +21,10 @@ import { getPiAgentDir } from "../pi-base/paths.ts";
 import { DECLARATIVE_ENV_OVERRIDES } from "../core/config-env.ts";
 import {
   CACHE_RETENTION_VALUES,
+  CONSOLIDATE_BEFORE_COMPACTION_VALUES,
   DEFAULTS,
   normalizeCacheRetention,
+  normalizeConsolidateBeforeCompaction,
   normalizeThresholdKnobs,
   parseModelConfig,
   type UnifiedConfig,
@@ -219,14 +221,16 @@ export const config = new ConfigManager<UnifiedConfig>({
     },
     {
       key: "consolidateBeforeCompaction",
-      type: "boolean",
+      type: "enum",
       label: "Consolidate before compaction",
       description:
-        "Run full observational memory consolidation (Observer, Reflector, Dropper) over all remaining tokens immediately before every compaction.",
-      value: cfg.consolidateBeforeCompaction,
-      valueDescriptions: {
-        on: "Enabled — fully consolidates remaining tokens before blackhole compacts",
-        off: "Disabled — compaction uses observations already recorded on normal thresholds",
+        "off=normal background OM only, flush=background OM + full consolidation of remaining tokens before compaction, only=bypass background triggers and wait until pre-compaction.",
+      value: normalizeConsolidateBeforeCompaction(cfg.consolidateBeforeCompaction) ?? "off",
+      options: [...CONSOLIDATE_BEFORE_COMPACTION_VALUES],
+      optionLabels: {
+        off: "off — normal background OM only",
+        flush: "flush — normal background OM + full consolidation before compaction",
+        only: "only — bypass background triggers; full consolidation only before compaction",
       },
     },
     {
@@ -462,7 +466,10 @@ export const config = new ConfigManager<UnifiedConfig>({
       delete parsed.model;
     }
 
-    if (typeof parsed.consolidateBeforeCompaction !== "boolean") {
+    const preCompactMode = normalizeConsolidateBeforeCompaction(parsed.consolidateBeforeCompaction);
+    if (preCompactMode) {
+      parsed.consolidateBeforeCompaction = preCompactMode;
+    } else {
       delete parsed.consolidateBeforeCompaction;
     }
 

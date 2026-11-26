@@ -28,7 +28,11 @@ import type { Runtime } from "../om/runtime.js";
 import { OM_SELECTION, type SelectionSnapshot } from "../om/ledger/diagnostics.js";
 import { debugLog } from "../om/debug-log.js";
 import { effectiveContextWindow } from "../om/model-budget.js";
-import { DEFAULTS, configFileNeedsMigration } from "../core/unified-config.js";
+import {
+  DEFAULTS,
+  configFileNeedsMigration,
+  isPreCompactionConsolidationEnabled,
+} from "../core/unified-config.js";
 import { buildRetainedToolOutputProjection } from "../core/tool-output-budget.js";
 import { buildGlobalIndexById, loadGlobalIndexById } from "../core/global-indices.js";
 import { loadGitFileTags } from "../extract/git-status.js";
@@ -719,8 +723,11 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
     let omDetails: Record<string, unknown> | undefined;
     let omHasContent = false;
     let selection: SelectionSnapshot | undefined;
+    const preCompactEnabled = isPreCompactionConsolidationEnabled(
+      omRuntime.config.consolidateBeforeCompaction,
+    );
     let projectionBranchEntries = branchEntries as any[];
-    if (omRuntime.config.memory !== false && omRuntime.config.consolidateBeforeCompaction) {
+    if (omRuntime.config.memory !== false && preCompactEnabled) {
       const preResult = await consolidateBeforeCompaction(pi, omRuntime, ctx as any, {
         signal: event.signal,
       });
@@ -755,7 +762,7 @@ export const registerBeforeCompactHook = (pi: ExtensionAPI, omRuntime: Runtime, 
         observationsPoolMaxTokens: omRuntime.config.observationsPoolMaxTokens,
         reflectionsPoolMaxTokens: omRuntime.config.reflectionsPoolMaxTokens ?? DEFAULTS.reflectionsPoolMaxTokens,
         fullFoldAlways: omRuntime.config.fullFoldAlways,
-        includeTipCoverage: omRuntime.config.consolidateBeforeCompaction === true,
+        includeTipCoverage: preCompactEnabled,
         taskQuery: extractSection(summary, "Session Goal").slice(0, 2000),
       };
       let projection;

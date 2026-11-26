@@ -88,7 +88,18 @@ export async function openForgeSettings(
     if (field) {
       if (field.kind === "boolean")
         draft = { ...draft, [field.key]: !draft[field.key] };
-      else if (field.kind === "model") {
+      else if (field.kind === "enum") {
+        const current = String(draft[field.key]);
+        const labels = field.options.map((opt) => {
+          const base = field.optionLabels[opt] ?? opt;
+          return opt === current ? `${base} [current]` : base;
+        });
+        const picked = await ui.select(`${field.label} — choose mode`, labels);
+        if (!picked) continue;
+        const pickedIndex = labels.indexOf(picked);
+        const selected = pickedIndex >= 0 ? field.options[pickedIndex] : undefined;
+        if (selected) draft = { ...draft, [field.key]: selected };
+      } else if (field.kind === "model") {
         const models = settingsOptions?.listModels?.() ?? [];
         const defaultOption = `Use session / blackhole default (${DEFAULT_CONSOLIDATOR_MODEL})`;
         const manualOption = "Enter provider/model manually";

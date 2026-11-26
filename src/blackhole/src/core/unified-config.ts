@@ -11,12 +11,25 @@ import { dirname, join } from "node:path";
 import {
   applyEnvOverrides,
   CACHE_RETENTION_VALUES,
+  CONSOLIDATE_BEFORE_COMPACTION_VALUES,
   DECLARATIVE_ENV_OVERRIDES,
+  isBackgroundConsolidationDeferred,
+  isPreCompactionConsolidationEnabled,
   MAX_TIMER_DELAY_MS,
   normalizeCacheRetention,
+  normalizeConsolidateBeforeCompaction,
+  type ConsolidateBeforeCompactionMode,
 } from "./config-env.js";
 
-export { CACHE_RETENTION_VALUES, normalizeCacheRetention };
+export {
+  CACHE_RETENTION_VALUES,
+  CONSOLIDATE_BEFORE_COMPACTION_VALUES,
+  isBackgroundConsolidationDeferred,
+  isPreCompactionConsolidationEnabled,
+  normalizeCacheRetention,
+  normalizeConsolidateBeforeCompaction,
+  type ConsolidateBeforeCompactionMode,
+};
 import { getAgentDir as originalGetAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CacheRetention, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
@@ -273,8 +286,11 @@ export interface UnifiedConfig {
   passive?: boolean;
   /** Enables observational memory (workers + content injection). Set to false for pi-vcc only. */
   memory: boolean;
-  /** Fully consolidate remaining tokens (Observer, Reflector, Dropper) before every compaction. */
-  consolidateBeforeCompaction: boolean;
+  /** Pre-compaction observational memory consolidation mode:
+   *  "off"   — normal background OM triggers only
+   *  "flush" — normal background OM triggers + full consolidation of remaining tokens before compaction
+   *  "only"  — bypass normal background OM triggers; wait and run full consolidation only before compaction */
+  consolidateBeforeCompaction: ConsolidateBeforeCompactionMode;
   /** Writes debug JSONL to agent directory. */
   debugLog: boolean;
   /** Show the blackhole footer status bar (token gauges + worker events). */
@@ -341,7 +357,7 @@ export const DEFAULTS: UnifiedConfig = {
   model: undefined,
 
   memory: true,
-  consolidateBeforeCompaction: false,
+  consolidateBeforeCompaction: "off",
   debugLog: false,
   statusBar: true,
   showWorkerNotifications: true,
@@ -656,8 +672,8 @@ function parseConfig(raw: Record<string, unknown>): Partial<UnifiedConfig> {
   if (typeof raw.noAutoCompact === "boolean") c.noAutoCompact = raw.noAutoCompact;
   if (typeof raw.passive === "boolean") c.passive = raw.passive;
   if (typeof raw.memory === "boolean") c.memory = raw.memory;
-  if (typeof raw.consolidateBeforeCompaction === "boolean")
-    c.consolidateBeforeCompaction = raw.consolidateBeforeCompaction;
+  const preCompactMode = normalizeConsolidateBeforeCompaction(raw.consolidateBeforeCompaction);
+  if (preCompactMode) c.consolidateBeforeCompaction = preCompactMode;
   if (typeof raw.fullFoldAlways === "boolean") c.fullFoldAlways = raw.fullFoldAlways;
   if (typeof raw.debugLog === "boolean") c.debugLog = raw.debugLog;
   if (typeof raw.statusBar === "boolean") c.statusBar = raw.statusBar;
