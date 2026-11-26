@@ -609,7 +609,13 @@ export async function consolidateBeforeCompaction(
       }
       if (options?.signal?.aborted) return skipPre("aborted");
 
-      // Wait for any already-running consolidation cycle instead of skipping.
+      // Wait for any already-running pre-compaction or background consolidation
+      // instead of skipping or racing ahead.
+      while (runtime.preCompactionConsolidationPromise) {
+        debugLog("pre_compaction_consolidation.await_pre_inflight", {});
+        await awaitWithAbort(runtime.preCompactionConsolidationPromise, options?.signal);
+        if (options?.signal?.aborted) return skipPre("aborted");
+      }
       while (runtime.consolidationInFlight && runtime.consolidationPromise) {
         debugLog("pre_compaction_consolidation.await_inflight", {});
         await awaitWithAbort(runtime.consolidationPromise, options?.signal);
@@ -684,21 +690,49 @@ export async function consolidateBeforeCompaction(
         "Observational memory: consolidating remaining tokens before compaction (Observer → Reflector → Dropper)",
       );
 
+      const uiWithWorking = ctx.ui as
+        | {
+            notify: (message: string, type?: "warning" | "info" | "error") => void;
+            setWorkingMessage?: (message?: string) => void;
+          }
+        | undefined;
+      if (ctx.hasUI && typeof uiWithWorking?.setWorkingMessage === "function") {
+        try {
+          uiWithWorking.setWorkingMessage(
+            "Consolidating memory before compaction (Observer → Reflector → Dropper)...",
+          );
+        } catch {
+          // Stale extension context — harmless.
+        }
+      }
+
+      const preCompactTask = runtime.launchConsolidationTask(ctx, async () =>
+        withDebugLogContext(
+          { enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId },
+          async () => {
+            if (!runtime.isGenerationActive(effectiveGeneration)) return;
+            await runConsolidationPipeline(pi, runtime, consolidationCtx, effectiveGeneration, {
+              forceFull: true,
+            });
+          },
+        ),
+      );
+      runtime.preCompactionConsolidationPromise = preCompactTask;
       try {
-        await runtime.launchConsolidationTask(ctx, async () =>
-          withDebugLogContext(
-            { enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId },
-            async () => {
-              if (!runtime.isGenerationActive(effectiveGeneration)) return;
-              await runConsolidationPipeline(pi, runtime, consolidationCtx, effectiveGeneration, {
-                forceFull: true,
-              });
-            },
-          ),
-        );
+        await preCompactTask;
       } finally {
+        if (runtime.preCompactionConsolidationPromise === preCompactTask) {
+          runtime.preCompactionConsolidationPromise = null;
+        }
         baseGeneration.signal.removeEventListener("abort", abortLinked);
         options?.signal?.removeEventListener("abort", abortLinked);
+        if (ctx.hasUI && typeof uiWithWorking?.setWorkingMessage === "function") {
+          try {
+            uiWithWorking.setWorkingMessage(undefined);
+          } catch {
+            // Stale extension context — harmless.
+          }
+        }
       }
 
       if (options?.signal?.aborted || !runtime.isGenerationActive(effectiveGeneration)) {

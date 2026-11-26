@@ -9,6 +9,7 @@ import {
   registerConsolidationTrigger,
   triggerConsolidation,
 } from "./consolidation.ts";
+import { registerCompactionTrigger } from "./compaction-trigger.ts";
 import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION } from "../hooks/before-compact.ts";
 import type { ConsolidateBeforeCompactionMode } from "../core/unified-config.ts";
 import {
@@ -373,6 +374,140 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     const omDetails = result.compaction.details?.["om.folded"];
     expect(omDetails?.reflections?.length).toBe(1);
     expect(omDetails?.observations?.length).toBe(1);
+  });
+
+  it("blocks agent_end, before_agent_start, and before_provider_request synchronously until pre-compaction consolidation finishes", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      compactAfterTokens: 1, // trigger immediately on agent_end
+      midRunCompaction: "off",
+      consolidateBeforeCompaction: "only",
+    });
+
+    const workingMessages: Array<string | undefined> = [];
+    h.ctx.hasUI = true;
+    h.ctx.ui = {
+      notify: vi.fn(),
+      setWorkingMessage: vi.fn((msg?: string) => workingMessages.push(msg)),
+    };
+    h.ctx.isIdle = () => true;
+    const compactCalls: number[] = [];
+    h.ctx.compact = vi.fn(() => {
+      compactCalls.push(h.modelsUsed.length);
+    });
+
+    // Gate the observer stream so we can prove agent_end + request hooks stay blocked while it runs
+    let releaseObserver!: () => void;
+    const observerGate = new Promise<void>((resolve) => {
+      releaseObserver = resolve;
+    });
+    const baseStream = h.ctx.modelRegistry.streamSimple;
+    h.ctx.modelRegistry.streamSimple = vi.fn((calledModel: any, context: any) => {
+      if (h.runtime.consolidationPhase === "observer") {
+        const stream = createAssistantMessageEventStream();
+        void observerGate.then(() => {
+          const message = {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-obs",
+                name: "record_observations",
+                arguments: {
+                  complete: true,
+                  observations: [
+                    {
+                      content: "Exponential backoff bug in src/client.ts line 42 was fixed with jitter preserved",
+                      relevance: "medium",
+                      sourceEntryIds: ["e1", "e2", "e3", "e4"],
+                    },
+                    {
+                      content: "Unit tests for src/client.ts backoff behavior now pass after the jitter fix",
+                      relevance: "low",
+                      sourceEntryIds: ["e4"],
+                    },
+                  ],
+                },
+              },
+            ],
+            api: calledModel.api,
+            provider: calledModel.provider,
+            model: calledModel.id,
+            usage,
+            timestamp: Date.now(),
+            stopReason: "toolUse",
+          } as any;
+          h.modelsUsed.push({
+            stage: "observer",
+            model: `${calledModel.provider}/${calledModel.id}`,
+          });
+          stream.push({ type: "done", reason: "toolUse", message });
+          stream.end(message);
+        });
+        return stream;
+      }
+      return baseStream(calledModel, context);
+    });
+
+    const handlers: Record<string, (event: any, ctx: any) => Promise<void> | void> = {};
+    h.pi.on.mockImplementation((name: string, fn: any) => {
+      handlers[name] = fn;
+    });
+    registerCompactionTrigger(h.pi, h.runtime);
+
+    let agentEndSettled = false;
+    const agentEndPromise = Promise.resolve(
+      handlers.agent_end?.({ messages: [] }, h.ctx),
+    ).then(() => {
+      agentEndSettled = true;
+    });
+
+    // Give microtasks a chance to enter observer stage
+    await new Promise((r) => setTimeout(r, 20));
+    expect(agentEndSettled).toBe(false);
+    expect(h.runtime.preCompactionConsolidationPromise).not.toBeNull();
+    expect(workingMessages[0]).toContain("Consolidating memory before compaction");
+
+    // Outgoing request hooks must also block while pre-compaction consolidation is running
+    let beforeAgentSettled = false;
+    let beforeProviderSettled = false;
+    const beforeAgentPromise = Promise.resolve(handlers.before_agent_start?.({}, h.ctx)).then(
+      () => {
+        beforeAgentSettled = true;
+      },
+    );
+    const beforeProviderPromise = Promise.resolve(
+      handlers.before_provider_request?.({ payload: {} }, h.ctx),
+    ).then(() => {
+      beforeProviderSettled = true;
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(beforeAgentSettled).toBe(false);
+    expect(beforeProviderSettled).toBe(false);
+    expect(h.ctx.compact).not.toHaveBeenCalled();
+
+    // Release observer — full Observer → Reflector → Dropper completes before agent_end / hooks resolve
+    releaseObserver();
+    await Promise.all([agentEndPromise, beforeAgentPromise, beforeProviderPromise]);
+
+    expect(agentEndSettled).toBe(true);
+    expect(beforeAgentSettled).toBe(true);
+    expect(beforeProviderSettled).toBe(true);
+    expect(h.runtime.preCompactionConsolidationPromise).toBeNull();
+    expect(h.modelsUsed.map((m) => m.stage)).toEqual(["observer", "reflector", "dropper"]);
+    expect(workingMessages.at(-1)).toBeUndefined();
+
+    // Let deferred idle-wait microtask invoke ctx.compact() and confirm consolidation was already done
+    await new Promise((r) => setTimeout(r, 25));
+    expect(compactCalls).toEqual([3]);
   });
 
   it("preserves forge consolidator model overrides across applyLoadedConfig reloads", () => {

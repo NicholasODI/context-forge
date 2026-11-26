@@ -199,6 +199,9 @@ export class Runtime {
   readonly instanceId: string = nextRuntimeInstanceId();
   consolidationInFlight = false;
   consolidationPromise: Promise<void> | null = null;
+  /** Active synchronous pre-compaction consolidation promise; request/turn hooks
+   *  await this so no outgoing request or compaction races ahead of consolidation. */
+  preCompactionConsolidationPromise: Promise<void> | null = null;
   consolidationPhase: ConsolidationPhase | undefined;
   /**
    * Models that failed in the current consolidation stage (in-memory only).
@@ -411,6 +414,16 @@ export class Runtime {
     this.lifecycleController.abort();
     this.clearCompactionTimer();
     this.compactInFlight = false;
+    this.preCompactionConsolidationPromise = null;
+  }
+
+  /**
+   * Synchronously block until any in-flight pre-compaction consolidation settles.
+   */
+  async waitForPreCompactionConsolidation(): Promise<void> {
+    while (this.preCompactionConsolidationPromise) {
+      await this.preCompactionConsolidationPromise;
+    }
   }
 
   /**

@@ -132,7 +132,21 @@ export function registerCompactionTrigger(
   runtime: Runtime,
   inlineCompact: InlineCompaction = compactInlineAtTurnBoundary,
 ): void {
-  pi.on("agent_start", (_event: any, ctx: any) => {
+  // Synchronous request gates: while pre-compaction consolidation is running,
+  // block new agent runs and outgoing provider requests until it completes.
+  pi.on("before_agent_start", async () => {
+    await runtime.waitForPreCompactionConsolidation();
+  });
+
+  pi.on("before_provider_request", async () => {
+    await runtime.waitForPreCompactionConsolidation();
+  });
+
+  pi.on("agent_start", async (_event: any, ctx: any) => {
+    // Wait for any active synchronous pre-compaction consolidation before
+    // resetting state or cancelling a pending idle-wait compaction.
+    await runtime.waitForPreCompactionConsolidation();
+
     // Reset the info gate — allow one info notification during the new turn.
     runtime.resetInfoGate();
 
@@ -170,9 +184,9 @@ export function registerCompactionTrigger(
     }
   });
 
-  pi.on("agent_end", (event: any, ctx: any) => {
+  pi.on("agent_end", async (event: any, ctx: any) => {
     try {
-      handleAgentEnd(pi, event, ctx, runtime);
+      await handleAgentEnd(pi, event, ctx, runtime);
     } catch (error) {
       if (isStaleExtensionContextError(error)) return;
       throw error;
@@ -408,7 +422,7 @@ async function handleTurnEnd(
   });
 }
 
-function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime): void {
+async function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime): Promise<void> {
   runtime.ensureConfig(ctx.cwd, (msg) => ctx.ui?.notify?.(msg, "warning"));
   // Reset the info gate — allow one notification during agent_end.
   runtime.resetInfoGate();
@@ -531,6 +545,37 @@ function handleAgentEnd(pi: ExtensionAPI, event: any, ctx: any, runtime: Runtime
   );
 
   runtime.compactInFlight = true;
+
+  // Synchronous pre-compaction consolidation: block agent_end (the current
+  // request) until Observer → Reflector → Dropper finish consolidating all
+  // remaining tokens, before returning control and scheduling ctx.compact().
+  if (
+    isPreCompactionConsolidationEnabled(runtime.config.consolidateBeforeCompaction) &&
+    runtime.config.memory !== false
+  ) {
+    try {
+      await consolidateBeforeCompaction(pi, runtime, ctx);
+    } catch (error) {
+      if (isStaleExtensionContextError(error)) {
+        runtime.compactInFlight = false;
+        dbg("compaction_trigger.agent_end.pre_compact_stale_ctx", {
+          message: getErrorMessage(error),
+        });
+        recordStaleCtxSkip(runtime, hasUI, ui, sessionId);
+        return;
+      }
+      dbg("compaction_trigger.agent_end.pre_compact_error", {
+        message: getErrorMessage(error),
+      });
+      notifySafely(
+        hasUI,
+        ui,
+        `Observational memory: pre-compaction consolidation failed: ${getErrorMessage(error)}`,
+        "warning",
+      );
+    }
+  }
+
   const controller = new AbortController();
   runtime.autoCompactionController = controller;
   const signal = controller.signal;
