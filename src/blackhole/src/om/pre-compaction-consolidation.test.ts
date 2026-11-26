@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Runtime } from "./runtime.ts";
 import {
+  OBSERVER_DRAIN_MAX_BATCHES,
   consolidateBeforeCompaction,
   registerConsolidationTrigger,
+  remainingUnobservedTokens,
   triggerConsolidation,
 } from "./consolidation.ts";
 import { registerCompactionTrigger } from "./compaction-trigger.ts";
@@ -257,16 +259,231 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
     expect(h.runtime.consolidationInFlight).toBe(false);
     expect(h.streamSimple).not.toHaveBeenCalled();
 
-    // Explicit manual /blackhole-consolidate still launches when due
+    // Explicit manual /blackhole-consolidate still launches and fully consolidates all stages
     const manual = triggerConsolidation(h.pi, h.runtime, h.ctx);
     expect(manual.outcome).toBe("launched");
     await h.runtime.consolidationPromise;
-    expect(h.streamSimple).toHaveBeenCalledTimes(1);
-
-    // Pre-compaction consolidation still runs full remaining stages (Reflector + Dropper)
-    const pre = await consolidateBeforeCompaction(h.pi, h.runtime, h.ctx);
-    expect(pre).toEqual({ outcome: "ran" });
     expect(h.modelsUsed.map((m) => m.stage)).toEqual(["observer", "reflector", "dropper"]);
+    expect(remainingUnobservedTokens(h.entries, h.runtime)).toBe(0);
+
+    // Pre-compaction consolidation afterwards sees the tip was already fully consolidated
+    const pre = await consolidateBeforeCompaction(h.pi, h.runtime, h.ctx);
+    expect(pre).toEqual({ outcome: "skipped", reason: "already_consolidated" });
+    expect(h.streamSimple).toHaveBeenCalledTimes(3);
+  });
+
+  it("/blackhole-consolidate drains an entire multi-chunk backlog (> OBSERVER_DRAIN_MAX_BATCHES) down to 0 remaining tokens", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    // Replace branch with 12 chunks (~200 tokens each) and cap observerChunkMaxTokens to 250
+    // so each observer batch processes at most 1 chunk — well beyond the default 3+1=4 batch cap.
+    h.entries.length = 0;
+    for (let i = 1; i <= 12; i++) {
+      h.entries.push({
+        type: "message",
+        id: `big-${i}`,
+        message: {
+          role: i % 2 === 1 ? "user" : "assistant",
+          content: `Chunk ${i} evidence: ` + `fact_${i} `.repeat(120),
+          timestamp: i,
+        },
+      });
+    }
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      observeAfterTokens: 999_999,
+      reflectAfterTokens: 999_999,
+      observerChunkMaxTokens: 250,
+      observationsPoolMaxTokens: 500,
+      observationsPoolTargetTokens: 100,
+      consolidateBeforeCompaction: "only",
+    });
+
+    const observedChunks: string[][] = [];
+    const baseStream = h.ctx.modelRegistry.streamSimple;
+    h.ctx.modelRegistry.streamSimple = vi.fn((calledModel: any, context: any) => {
+      if (h.runtime.consolidationPhase === "observer") {
+        const userMsg = context.messages.findLast((m: any) => m.role === "user");
+        const body =
+          typeof userMsg.content === "string"
+            ? userMsg.content
+            : userMsg.content.map((b: any) => b.text ?? "").join("\n");
+        const ids = [...body.matchAll(/\[Source entry id: ([^\]]+)\]/g)].map((m) => m[1]);
+        observedChunks.push(ids);
+        h.modelsUsed.push({
+          stage: "observer",
+          model: `${calledModel.provider}/${calledModel.id}`,
+        });
+        return toolResponse(calledModel, "record_observations", {
+          complete: true,
+          observations: ids.map((id) => ({
+            content: `Observed durable fact from ${id} with details`,
+            relevance: "medium",
+            sourceEntryIds: [id],
+          })),
+        });
+      }
+      return baseStream(calledModel, context);
+    });
+
+    const manual = triggerConsolidation(h.pi, h.runtime, h.ctx);
+    expect(manual.outcome).toBe("launched");
+    await h.runtime.consolidationPromise;
+
+    // Every single one of the 12 chunks was drained well past the default 3+1=4 batch cap!
+    expect(observedChunks.length).toBeGreaterThan(OBSERVER_DRAIN_MAX_BATCHES + 1);
+    expect(observedChunks.flat()).toEqual(Array.from({ length: 12 }, (_, i) => `big-${i + 1}`));
+    expect(h.runtime.getCursor("observer")?.entryId).toBe("big-12");
+    expect(remainingUnobservedTokens(h.entries, h.runtime)).toBe(0);
+    // Reflector and Dropper also ran after the full observer drain
+    expect(h.modelsUsed.some((m) => m.stage === "reflector")).toBe(true);
+    expect(h.modelsUsed.some((m) => m.stage === "dropper")).toBe(true);
+  });
+
+  it("pre-compaction consolidation drains all remaining chunks across an unrenderable leading entry before unblocking requests", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    h.entries.length = 0;
+    // Empty/unrenderable leading entry right before oversized chunks
+    h.entries.push({
+      type: "message",
+      id: "empty-0",
+      message: { role: "assistant", content: "", timestamp: 0 },
+    });
+    for (let i = 1; i <= 8; i++) {
+      h.entries.push({
+        type: "message",
+        id: `pre-${i}`,
+        message: {
+          role: i % 2 === 1 ? "user" : "assistant",
+          content: `Pre-compact chunk ${i}: ` + `detail_${i} `.repeat(120),
+          timestamp: i,
+        },
+      });
+    }
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      compactAfterTokens: 1,
+      observeAfterTokens: 999_999,
+      reflectAfterTokens: 999_999,
+      observerChunkMaxTokens: 250,
+      observationsPoolMaxTokens: 500,
+      observationsPoolTargetTokens: 100,
+      midRunCompaction: "off",
+      consolidateBeforeCompaction: "only",
+    });
+    h.ctx.isIdle = () => true;
+    h.ctx.compact = vi.fn();
+
+    let releaseLastChunk!: () => void;
+    const lastChunkGate = new Promise<void>((resolve) => {
+      releaseLastChunk = resolve;
+    });
+    const observedIds: string[] = [];
+    const baseStream = h.ctx.modelRegistry.streamSimple;
+    h.ctx.modelRegistry.streamSimple = vi.fn((calledModel: any, context: any) => {
+      if (h.runtime.consolidationPhase === "observer") {
+        const userMsg = context.messages.findLast((m: any) => m.role === "user");
+        const body =
+          typeof userMsg.content === "string"
+            ? userMsg.content
+            : userMsg.content.map((b: any) => b.text ?? "").join("\n");
+        const ids = [...body.matchAll(/\[Source entry id: ([^\]]+)\]/g)].map((m) => m[1]);
+        observedIds.push(...ids);
+        h.modelsUsed.push({
+          stage: "observer",
+          model: `${calledModel.provider}/${calledModel.id}`,
+        });
+        if (ids.includes("pre-8")) {
+          const stream = createAssistantMessageEventStream();
+          void lastChunkGate.then(() => {
+            const message = {
+              role: "assistant",
+              content: [
+                {
+                  type: "toolCall",
+                  id: "call-last",
+                  name: "record_observations",
+                  arguments: {
+                    complete: true,
+                    observations: ids.map((id) => ({
+                      content: `Observed final chunk ${id}`,
+                      relevance: "medium",
+                      sourceEntryIds: [id],
+                    })),
+                  },
+                },
+              ],
+              api: calledModel.api,
+              provider: calledModel.provider,
+              model: calledModel.id,
+              usage,
+              timestamp: Date.now(),
+              stopReason: "toolUse",
+            } as any;
+            stream.push({ type: "done", reason: "toolUse", message });
+            stream.end(message);
+          });
+          return stream;
+        }
+        return toolResponse(calledModel, "record_observations", {
+          complete: true,
+          observations: ids.map((id) => ({
+            content: `Observed chunk ${id}`,
+            relevance: "medium",
+            sourceEntryIds: [id],
+          })),
+        });
+      }
+      return baseStream(calledModel, context);
+    });
+
+    const handlers: Record<string, (event: any, ctx: any) => Promise<void> | void> = {};
+    h.pi.on.mockImplementation((name: string, fn: any) => {
+      handlers[name] = fn;
+    });
+    registerCompactionTrigger(h.pi, h.runtime);
+
+    let agentEndDone = false;
+    const agentEndP = Promise.resolve(handlers.agent_end?.({ messages: [] }, h.ctx)).then(() => {
+      agentEndDone = true;
+    });
+
+    // Wait until chunks 1..7 have processed and chunk 8 is gated
+    await new Promise((r) => setTimeout(r, 40));
+    expect(agentEndDone).toBe(false);
+    expect(observedIds).toContain("pre-8");
+
+    // Request gate stays blocked until chunk 8 + Reflector + Dropper complete
+    let nextRequestUnblocked = false;
+    const nextRequestP = Promise.resolve(
+      handlers.before_provider_request?.({ payload: {} }, h.ctx),
+    ).then(() => {
+      nextRequestUnblocked = true;
+    });
+    await new Promise((r) => setTimeout(r, 15));
+    expect(nextRequestUnblocked).toBe(false);
+
+    releaseLastChunk();
+    await Promise.all([agentEndP, nextRequestP]);
+
+    expect(agentEndDone).toBe(true);
+    expect(nextRequestUnblocked).toBe(true);
+    expect(observedIds).toEqual(Array.from({ length: 8 }, (_, i) => `pre-${i + 1}`));
+    expect(remainingUnobservedTokens(h.entries, h.runtime)).toBe(0);
+    expect(h.runtime.getCursor("observer")?.entryId).toBe("pre-8");
+    expect(h.modelsUsed.some((m) => m.stage === "reflector")).toBe(true);
+    expect(h.modelsUsed.some((m) => m.stage === "dropper")).toBe(true);
   });
 
   it("fully consolidates remaining below-threshold tokens across Observer, Reflector, and Dropper using the separate consolidator model", async () => {

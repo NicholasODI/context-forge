@@ -20,7 +20,7 @@ const SKIP_MESSAGES: Record<string, string> = {
   legacy_passive: "legacy passive=true config disables automatic memory workers",
   in_flight: "a consolidation is already in flight — run /blackhole-memory to watch it",
   retry_gated: "retry gate active after a recent failure (backoff in progress)",
-  no_stage_due: "no stage is due — nothing new past the token thresholds since the last run",
+  no_stage_due: "nothing remaining to consolidate — all tokens and observations are already up to date",
   stale_ctx: "the session context went stale between trigger and launch",
   generation_inactive: "the session changed after launch was captured",
 };

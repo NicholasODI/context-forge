@@ -162,10 +162,17 @@ function workerFailure(worker: string, attempts: number, model: string, firstErr
 export const OBSERVER_DRAIN_MAX_BATCHES = 3;
 
 /**
- * Higher observer drain limit for pre-compaction full consolidation so all
- * remaining source chunks up to the branch tip are observed before compaction.
+ * Unbounded (progress-guarded) observer drain limit for full consolidation runs
+ * (/blackhole-consolidate and pre-compaction consolidation), ensuring every
+ * remaining source chunk up to the branch tip is observed.
  */
-export const PRE_COMPACTION_OBSERVER_DRAIN_MAX_BATCHES = 32;
+export const PRE_COMPACTION_OBSERVER_DRAIN_MAX_BATCHES = Number.POSITIVE_INFINITY;
+
+/**
+ * Higher fit-to-window shrink batch limit for Reflector/Dropper during full
+ * consolidation runs so large backlogs do not abort at the default 8-batch cap.
+ */
+export const FORCE_FULL_SHRINK_MAX_BATCHES = 128;
 
 /**
  * How many fit-to-window batches one reflector/dropper shrink pass may run
@@ -515,6 +522,84 @@ export interface ConsolidationPipelineOptions {
   readonly forceFull?: boolean;
 }
 
+function observerEffectiveStart(
+  entries: Entry[],
+  runtime: Runtime,
+  pending?: PendingOMState,
+): number {
+  const observerCursor = runtime.getCursor("observer");
+  const fallbackStart = (): number => {
+    const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+    return lastCoverageIdx >= 0 ? lastCoverageIdx : findLastCompactionIndex(entries);
+  };
+  let start: number;
+  if (observerCursor) {
+    const cursorIdx = entryIndexForId(entries, observerCursor.entryId);
+    start = cursorIdx >= 0 ? cursorIdx : fallbackStart();
+  } else {
+    start = fallbackStart();
+  }
+  if (pending?.observation?.coversUpToId) {
+    const pendingIdx = entryIndexForId(entries, pending.observation.coversUpToId);
+    if (pendingIdx > start) start = pendingIdx;
+  }
+  return start;
+}
+
+/**
+ * Estimate remaining unobserved source tokens after the observer's current
+ * cursor / coverage marker. Returns 0 when no renderable source entries remain.
+ */
+export function remainingUnobservedTokens(
+  entries: Entry[],
+  runtime: Runtime,
+  pending?: PendingOMState,
+): number {
+  const start = observerEffectiveStart(entries, runtime, pending);
+  const remainingEntries = sourceEntriesAfter(entries, start);
+  if (remainingEntries.length === 0) return 0;
+  const serialized = serializeSourceAddressedBranchEntries(remainingEntries);
+  if (serialized.sourceEntryIds.length === 0 || !serialized.text.trim()) return 0;
+  return rawTokensAfterIndex(entries, start);
+}
+
+function hasRemainingConsolidationWork(
+  entries: Entry[],
+  runtime: Runtime,
+  pending?: PendingOMState,
+): boolean {
+  if (anyStageDue(entries, runtime, pending)) return true;
+  if (remainingUnobservedTokens(entries, runtime, pending) > 0) return true;
+  // Check unreviewed observations for Reflector
+  if (!reflectionAlreadyReviewed(entries, runtime, pending)) {
+    const lastReflectionIdx = pending ? -1 : latestCoverageIndex(entries, OM_REFLECTIONS_RECORDED);
+    const rawObs = pending
+      ? pendingObservationsCreatedAfter(pending, entries, pending.reflection?.coversUpToId)
+      : observationsCreatedAfterIndex(entries, lastReflectionIdx);
+    const activeById = new Set(livePoolObservations(entries, pending).map((o) => o.id));
+    if (rawObs.some((o) => activeById.has(o.id))) return true;
+  }
+  // Check Dropper candidates when pool exceeds target
+  const poolObs = livePoolObservations(entries, pending);
+  const poolRefs = livePoolReflections(entries, pending);
+  if (poolObs.length > 0 && poolRefs.length > 0) {
+    const poolTokens = poolObs.reduce((sum, o) => sum + observationRenderedTokens(o), 0);
+    const eligible = dropEligibility(poolObs, poolRefs).eligible;
+    const maxDrops = Math.min(
+      eligible.length,
+      maxDropCountForPool(
+        poolObs,
+        poolTokens,
+        runtime.config.observationsPoolMaxTokens,
+        0,
+        runtime.config.observationsPoolTargetTokens,
+      ),
+    );
+    if (maxDrops > 0) return true;
+  }
+  return false;
+}
+
 /**
  * Flush manual-mode pending OM batches into the active session branch and clear
  * pending.json. Returns true when at least one pending batch was flushed.
@@ -739,8 +824,40 @@ export async function consolidateBeforeCompaction(
         return skipPre("aborted");
       }
 
-      runtime.lastPreCompactionConsolidation = { sessionId, lastSourceEntryId };
-      debugLog("pre_compaction_consolidation.complete", { runId, sessionId, lastSourceEntryId });
+      let remainingTokens = 0;
+      try {
+        const afterEntries = ctx.sessionManager.getBranch() as Entry[];
+        const afterPending = isManualMode(runtime.config)
+          ? readPendingState(sessionId)
+          : undefined;
+        remainingTokens = remainingUnobservedTokens(afterEntries, runtime, afterPending);
+      } catch {
+        // Stale sessionManager — skip remaining-token recheck.
+      }
+      if (remainingTokens === 0) {
+        runtime.lastPreCompactionConsolidation = { sessionId, lastSourceEntryId };
+      } else {
+        debugLog("pre_compaction_consolidation.incomplete", {
+          runId,
+          sessionId,
+          lastSourceEntryId,
+          remainingTokens,
+        });
+        if (ctx.hasUI && ctx.ui) {
+          try {
+            ctx.ui.notify(
+              `Observational memory: pre-compaction consolidation stopped with ~${remainingTokens.toLocaleString()} unobserved tokens remaining`,
+              "warning",
+            );
+          } catch {}
+        }
+      }
+      debugLog("pre_compaction_consolidation.complete", {
+        runId,
+        sessionId,
+        lastSourceEntryId,
+        remainingTokens,
+      });
       return { outcome: "ran" };
     },
   );
@@ -870,8 +987,12 @@ function maybeLaunchConsolidationInternal(
   // In manual mode, the branch has no OM markers — pending state provides
   // pool fullness and new‑data visibility for reflector/dropper checks.
   const pending = isManualMode(runtime.config) ? readPendingState(sessionId) : undefined;
-  const stageDue = anyStageDue(entries, runtime, pending);
+  const stageDue =
+    source === "manual"
+      ? hasRemainingConsolidationWork(entries, runtime, pending)
+      : anyStageDue(entries, runtime, pending);
   debugLog("consolidation.due-check", {
+    source,
     stageDue,
     entryCount: entries.length,
     totalTokens: rawTokensSinceObservationCoverage(entries),
@@ -892,13 +1013,46 @@ function maybeLaunchConsolidationInternal(
     modelRegistry: ctx.modelRegistry,
     sessionManager: ctx.sessionManager,
   };
+  const forceFull = source === "manual";
 
   void runtime.launchConsolidationTask(ctx, async () =>
     withDebugLogContext(
       { enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId },
       async () => {
         if (!runtime.isGenerationActive(generation)) return;
-        await runConsolidationPipeline(pi, runtime, consolidationCtx, generation);
+        await runConsolidationPipeline(
+          pi,
+          runtime,
+          consolidationCtx,
+          generation,
+          forceFull ? { forceFull: true } : undefined,
+        );
+        if (forceFull && runtime.isGenerationActive(generation)) {
+          try {
+            const afterEntries = ctx.sessionManager.getBranch() as Entry[];
+            const afterPending = isManualMode(runtime.config)
+              ? readPendingState(sessionId)
+              : undefined;
+            const remaining = remainingUnobservedTokens(afterEntries, runtime, afterPending);
+            const tipSourceId = afterEntries.filter(isSourceEntry).at(-1)?.id;
+            if (remaining === 0 && tipSourceId) {
+              runtime.lastPreCompactionConsolidation = {
+                sessionId,
+                lastSourceEntryId: tipSourceId,
+              };
+            }
+            if (ctx.hasUI && ctx.ui) {
+              ctx.ui.notify(
+                remaining === 0
+                  ? "Observational memory: full consolidation complete (0 remaining tokens)."
+                  : `Observational memory: consolidation stopped with ~${remaining.toLocaleString()} unobserved tokens remaining.`,
+                remaining === 0 ? "info" : "warning",
+              );
+            }
+          } catch {
+            // Stale extension context — harmless.
+          }
+        }
       },
     ),
   );
@@ -1169,20 +1323,30 @@ export async function runObserverStage(
   // Full post-cursor source list, kept for the shrink-to-fit pass: the capped
   // chunk below may prove too big for every model, in which case the stage
   // re-caps this list against the largest resolved window instead of aborting.
-  const allChunkEntries = sourceEntriesAfter(entries, effectiveStart);
-  let chunkEntries = allChunkEntries;
-
-  // Cap observer input to observerChunkMaxTokens (oldest prefix first)
+  let allChunkEntries = sourceEntriesAfter(entries, effectiveStart);
   const maxChunkTokens = runtime.config.observerChunkMaxTokens;
-  if (tokens > maxChunkTokens) {
-    chunkEntries = capSourceEntriesToTokens(chunkEntries, maxChunkTokens);
-  }
+  let chunkEntries =
+    tokens > maxChunkTokens
+      ? capSourceEntriesToTokens(allChunkEntries, maxChunkTokens)
+      : allChunkEntries;
 
   let {
     text: chunk,
     sourceEntryIds,
     sourceEntryTimestamps,
   } = serializeSourceAddressedBranchEntries(chunkEntries);
+  // Guard against an unrenderable leading entry before a large (>maxChunkTokens)
+  // entry: capSourceEntriesToTokens could otherwise isolate only the unrenderable
+  // prefix, making the serializer return empty and stalling the rest of the backlog.
+  while ((!sourceEntryIds.at(-1) || !chunk.trim()) && chunkEntries.length < allChunkEntries.length) {
+    allChunkEntries = allChunkEntries.slice(chunkEntries.length);
+    chunkEntries = capSourceEntriesToTokens(allChunkEntries, maxChunkTokens);
+    ({
+      text: chunk,
+      sourceEntryIds,
+      sourceEntryTimestamps,
+    } = serializeSourceAddressedBranchEntries(chunkEntries));
+  }
   // Coverage claims only what was actually delivered: the id the serializer
   // emitted last, not the last entry of the capped slice (the serializer
   // skips entries it cannot render). With the oldest-first cap that is the
@@ -1201,8 +1365,13 @@ export async function runObserverStage(
   // over entries never sent.
   const lastSourceEntryId = entries.filter(isSourceEntry).at(-1)?.id;
   const continueSources = (): StageOutcome | Promise<StageOutcome> => {
-    if (drainRemaining <= 0) return "continue";
+    if (!forceFull && drainRemaining <= 0) return "continue";
     if (!coversUpToId || coversUpToId === lastSourceEntryId) return "continue";
+    // Strict forward-progress guard: never recurse unless coverage actually
+    // moved past effectiveStart (prevents infinite loops when forceFull drains
+    // unboundedly across very large backlogs).
+    const nextStart = entryIndexForId(entries, coversUpToId);
+    if (nextStart <= effectiveStart) return "continue";
     return runObserverStage(
       pi,
       runtime,
@@ -1210,7 +1379,7 @@ export async function runObserverStage(
       generation,
       resolveModel,
       true,
-      drainRemaining - 1,
+      Number.isFinite(drainRemaining) ? drainRemaining - 1 : drainRemaining,
       forceFull,
     );
   };
@@ -1706,7 +1875,8 @@ export async function runObserverStage(
         const data = buildObservationsRecordedData(result.observations, coverageId);
         if (!data) {
           runtime.advanceCursor("observer", coverageId, "empty");
-          return "continue";
+          if (result.partialCoverageId) coversUpToId = coverageId;
+          return continueSources();
         }
         debugLog("observer.records", {
           count: result.observations.length,
@@ -2242,10 +2412,11 @@ export async function runReflectorStage(
     // Bounded by design (see WORKER_SHRINK_MAX_BATCHES): past the cap the
     // pass aborts upfront with the cursor unmoved instead of burning a worker
     // call per batch and still advancing nothing.
-    if (planned.length > WORKER_SHRINK_MAX_BATCHES) {
+    const maxShrinkBatches = forceFull ? FORCE_FULL_SHRINK_MAX_BATCHES : WORKER_SHRINK_MAX_BATCHES;
+    if (planned.length > maxShrinkBatches) {
       debugLog("reflector.batch_cap", {
         batchCount: planned.length,
-        maxBatches: WORKER_SHRINK_MAX_BATCHES,
+        maxBatches: maxShrinkBatches,
         newObsCount: input.newObservations.length,
         model: `${bestModel.provider}/${bestModel.id}`,
       });
@@ -2253,7 +2424,7 @@ export async function runReflectorStage(
         ctx.hasUI,
         ctx.ui,
         `Observational memory: reflector deferring ${input.newObservations.length} observations ` +
-          `(${planned.length} fit-to-window batches exceeds the per-run limit of ${WORKER_SHRINK_MAX_BATCHES}; ` +
+          `(${planned.length} fit-to-window batches exceeds the per-run limit of ${maxShrinkBatches}; ` +
           `a larger reflector model would clear the backlog)`,
       );
       return { outcome: "abort", sameRunReflections: [] };
@@ -2304,10 +2475,10 @@ export async function runReflectorStage(
       if (!runtime.isGenerationActive(generation))
         return { outcome: "abort", sameRunReflections: [] };
       batchRuns += 1;
-      if (batchRuns > WORKER_SHRINK_MAX_BATCHES) {
+      if (batchRuns > maxShrinkBatches) {
         debugLog("reflector.batch_cap", {
           batchRuns,
-          maxBatches: WORKER_SHRINK_MAX_BATCHES,
+          maxBatches: maxShrinkBatches,
           newObsCount: input.newObservations.length,
           model: `${bestModel.provider}/${bestModel.id}`,
         });
@@ -2876,10 +3047,11 @@ export async function runDropperStage(
     // Bounded by design (see WORKER_SHRINK_MAX_BATCHES): past the cap the
     // pass aborts upfront with the cursor unmoved instead of burning a worker
     // call per batch and still advancing nothing.
-    if (planned.length > WORKER_SHRINK_MAX_BATCHES) {
+    const maxShrinkBatches = forceFull ? FORCE_FULL_SHRINK_MAX_BATCHES : WORKER_SHRINK_MAX_BATCHES;
+    if (planned.length > maxShrinkBatches) {
       debugLog("dropper.batch_cap", {
         batchCount: planned.length,
-        maxBatches: WORKER_SHRINK_MAX_BATCHES,
+        maxBatches: maxShrinkBatches,
         candidateCount: input.eligibleObservations.length,
         model: `${bestModel.provider}/${bestModel.id}`,
       });
@@ -2887,7 +3059,7 @@ export async function runDropperStage(
         ctx.hasUI,
         ctx.ui,
         `Observational memory: dropper deferring ${input.eligibleObservations.length} candidates ` +
-          `(${planned.length} fit-to-window batches exceeds the per-run limit of ${WORKER_SHRINK_MAX_BATCHES}; ` +
+          `(${planned.length} fit-to-window batches exceeds the per-run limit of ${maxShrinkBatches}; ` +
           `a larger worker input budget/context may permit a complete review)`,
       );
       return "abort";
@@ -2936,10 +3108,10 @@ export async function runDropperStage(
       if (!batch || batch.length === 0) continue;
       if (!runtime.isGenerationActive(generation)) return "abort";
       batchRuns += 1;
-      if (batchRuns > WORKER_SHRINK_MAX_BATCHES) {
+      if (batchRuns > maxShrinkBatches) {
         debugLog("dropper.batch_cap", {
           batchRuns,
-          maxBatches: WORKER_SHRINK_MAX_BATCHES,
+          maxBatches: maxShrinkBatches,
           candidateCount: input.eligibleObservations.length,
           model: `${bestModel.provider}/${bestModel.id}`,
         });
