@@ -1399,6 +1399,25 @@ export async function runObserverStage(
   let coversUpToId = sourceEntryIds.at(-1);
   if (!coversUpToId || !chunk.trim()) return "continue";
 
+  const estObserverPromptsRemaining = Math.max(1, Math.ceil(tokens / Math.max(1, maxChunkTokens)));
+  if (!runtime.consolidationProgress || runtime.consolidationProgress.stage !== "observer") {
+    runtime.consolidationProgress = {
+      promptsCompleted: runtime.consolidationProgress?.promptsCompleted ?? 0,
+      stage: "observer",
+      stagePromptsRemaining: estObserverPromptsRemaining,
+      stagePromptsTotal: estObserverPromptsRemaining,
+      backlogTokens: tokens,
+      stageInitialTokens: tokens,
+    };
+  } else {
+    runtime.consolidationProgress.backlogTokens = tokens;
+    runtime.consolidationProgress.stagePromptsRemaining = estObserverPromptsRemaining;
+    runtime.consolidationProgress.stagePromptsTotal = Math.max(
+      runtime.consolidationProgress.stagePromptsTotal,
+      runtime.consolidationProgress.promptsCompleted + estObserverPromptsRemaining,
+    );
+  }
+
   // The branch's last source entry as of this run's snapshot: the drain keeps
   // going until coverage reaches it. Entries arriving after the snapshot belong
   // to the next cycle; a trailing entry the serializer cannot render keeps the
@@ -1408,6 +1427,23 @@ export async function runObserverStage(
   // accepted deliberately: advancing past proven-empty would claim coverage
   // over entries never sent.
   const lastSourceEntryId = entries.filter(isSourceEntry).at(-1)?.id;
+  const markObserverPromptDone = (nextCoverId: string): void => {
+    const p = runtime.consolidationProgress;
+    if (!p || p.stage !== "observer") return;
+    p.promptsCompleted += 1;
+    if (nextCoverId === lastSourceEntryId) {
+      p.backlogTokens = 0;
+      p.stagePromptsRemaining = 0;
+      p.stagePromptsTotal = Math.max(p.stagePromptsTotal, p.promptsCompleted);
+      return;
+    }
+    const remIdx = entryIndexForId(entries, nextCoverId);
+    const remTok = remIdx >= 0 ? rawTokensAfterIndex(entries, remIdx) : 0;
+    p.backlogTokens = remTok;
+    p.stagePromptsRemaining =
+      remTok > 0 ? Math.max(1, Math.ceil(remTok / Math.max(1, maxChunkTokens))) : 0;
+    p.stagePromptsTotal = Math.max(p.stagePromptsTotal, p.promptsCompleted + p.stagePromptsRemaining);
+  };
   const continueSources = (): StageOutcome | Promise<StageOutcome> => {
     if (!forceFull && drainRemaining <= 0) return "continue";
     if (!coversUpToId || coversUpToId === lastSourceEntryId) return "continue";
@@ -1920,6 +1956,7 @@ export async function runObserverStage(
         if (!data) {
           runtime.advanceCursor("observer", coverageId, "empty");
           if (result.partialCoverageId) coversUpToId = coverageId;
+          markObserverPromptDone(coverageId);
           return continueSources();
         }
         debugLog("observer.records", {
@@ -1960,6 +1997,7 @@ export async function runObserverStage(
         // The partial point is now the drain's starting line: without this the
         // recursion below would re-offer the already-covered prefix.
         if (result.partialCoverageId) coversUpToId = coverageId;
+        markObserverPromptDone(coverageId);
         // Recorded and covered up to the delivered point — drain the rest of
         // the backlog now instead of waiting for the next turn_end.
         return continueSources();
@@ -2008,6 +2046,7 @@ export async function runObserverStage(
       }
       // A clean "nothing new" close still proves coverage up to the delivered
       // point, so the rest of the backlog can drain in this same run.
+      markObserverPromptDone(coversUpToId);
       return continueSources();
     } catch (error) {
       if (!runtime.isGenerationActive(generation)) return "abort";
@@ -2338,6 +2377,19 @@ export async function runReflectorStage(
     );
     return { outcome: "continue", sameRunReflections: [] };
   }
+  const reflectorInitialItems =
+    input.newObservations.length > 0 ? input.newObservations.length : input.newReflections.length;
+  runtime.consolidationProgress = {
+    promptsCompleted: runtime.consolidationProgress?.promptsCompleted ?? 0,
+    stage: "reflector",
+    stagePromptsRemaining: 1,
+    stagePromptsTotal: 1,
+    backlogTokens: input.newItemsTokens,
+    stageInitialTokens: input.newItemsTokens,
+    backlogItems: reflectorInitialItems,
+    stageInitialItems: reflectorInitialItems,
+    backlogItemUnit: input.newObservations.length > 0 ? "observations" : "reflections",
+  };
   const reflectorStaticTokens = await workerStaticPromptTokens("reflector");
 
   // Shared commit tail: normal and batched runs both advance the cursor at
@@ -2346,7 +2398,15 @@ export async function runReflectorStage(
     reflections: Reflection[] | undefined,
     errorText: string | undefined,
     resolved: ResolvedModel,
+    batchesAlreadyCounted = false,
   ): ReflectorStageResult => {
+    const p = runtime.consolidationProgress;
+    if (p && p.stage === "reflector") {
+      if (!batchesAlreadyCounted) p.promptsCompleted += 1;
+      p.stagePromptsRemaining = 0;
+      p.backlogTokens = 0;
+      p.backlogItems = 0;
+    }
     if (errorText) {
       handleWorkerErrorAfterClose({
         runtime,
@@ -2494,6 +2554,14 @@ export async function runReflectorStage(
     // Total executed batches stay bounded by WORKER_SHRINK_MAX_BATCHES.
     const queue: Observation[][] = [...planned];
     let batchRuns = 0;
+    const initialNonEmptyReflectorBatches = queue.filter((b) => b.length > 0).length;
+    if (
+      runtime.consolidationProgress?.stage === "reflector" &&
+      initialNonEmptyReflectorBatches > 0
+    ) {
+      runtime.consolidationProgress.stagePromptsTotal = initialNonEmptyReflectorBatches;
+      runtime.consolidationProgress.stagePromptsRemaining = initialNonEmptyReflectorBatches;
+    }
     // Shared void tail for failures splitting cannot save: committing a
     // prefix would advance coverage over unreviewed observations, so the run
     // is abandoned with the cursor unmoved.
@@ -2566,6 +2634,19 @@ export async function runReflectorStage(
           firstError = result.errorAfterClose;
         }
         merged = mergeReflections(merged, result.reflections ?? []);
+        const p = runtime.consolidationProgress;
+        if (p && p.stage === "reflector") {
+          p.promptsCompleted += 1;
+          const remainingBatches = queue.filter((b) => b.length > 0);
+          p.stagePromptsRemaining = remainingBatches.length;
+          p.stagePromptsTotal = Math.max(p.stagePromptsTotal, batchRuns + remainingBatches.length);
+          p.backlogItems = remainingBatches.reduce((sum, b) => sum + b.length, 0);
+          p.backlogTokens = remainingBatches.reduce(
+            (sum, b) =>
+              sum + b.reduce((bs, o) => bs + estimateStringTokens(observationToSummaryLine(o)), 0),
+            0,
+          );
+        }
       } catch (error) {
         if (!runtime.isGenerationActive(generation))
           return { outcome: "abort", sameRunReflections: [] };
@@ -2586,6 +2667,12 @@ export async function runReflectorStage(
         ) {
           const mid = Math.max(1, Math.floor(batch.length / 2));
           queue.unshift(batch.slice(0, mid), batch.slice(mid));
+          const p = runtime.consolidationProgress;
+          if (p && p.stage === "reflector") {
+            const remainingBatches = queue.filter((b) => b.length > 0);
+            p.stagePromptsRemaining = remainingBatches.length;
+            p.stagePromptsTotal = Math.max(p.stagePromptsTotal, batchRuns + remainingBatches.length);
+          }
           debugLog("reflector.batch_split", {
             batchObsCount: batch.length,
             model: `${bestModel.provider}/${bestModel.id}`,
@@ -2595,7 +2682,12 @@ export async function runReflectorStage(
         return voidBatchedRun(error);
       }
     }
-    return commitReflectorResult(merged.length > 0 ? merged : undefined, firstError, best.resolved);
+    return commitReflectorResult(
+      merged.length > 0 ? merged : undefined,
+      firstError,
+      best.resolved,
+      true,
+    );
   };
 
   // Largest-window model resolved so far (shrink target) and whether any
@@ -3015,7 +3107,20 @@ export async function runDropperStage(
 
   // Shared commit tail: normal and batched runs both advance the cursor at
   // most once, after all work for this invocation is done.
-  const commitDropperResult = (droppedIds: DropSelection | undefined): StageOutcome => {
+  const commitDropperResult = (
+    droppedIds: DropSelection | undefined,
+    batchesAlreadyCounted = false,
+  ): StageOutcome => {
+    const p = runtime.consolidationProgress;
+    if (p) {
+      if (p.stage === "dropper" && !batchesAlreadyCounted) {
+        p.promptsCompleted += 1;
+      }
+      p.stage = "dropper";
+      p.stagePromptsRemaining = 0;
+      p.backlogTokens = 0;
+      p.backlogItems = 0;
+    }
     const latestReflectionCoverageId = isManualMode(runtime.config)
       ? input.pending?.reflection?.coversUpToId
       : latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
@@ -3130,6 +3235,11 @@ export async function runDropperStage(
     // bounded by WORKER_SHRINK_MAX_BATCHES.
     const queue = [...planned];
     let batchRuns = 0;
+    const initialNonEmptyDropperBatches = queue.filter((b) => b.length > 0).length;
+    if (runtime.consolidationProgress?.stage === "dropper" && initialNonEmptyDropperBatches > 0) {
+      runtime.consolidationProgress.stagePromptsTotal = initialNonEmptyDropperBatches;
+      runtime.consolidationProgress.stagePromptsRemaining = initialNonEmptyDropperBatches;
+    }
     // Shared void tail for failures splitting cannot save: a partial
     // evaluation is never published, so the run is abandoned with the cursor
     // unmoved.
@@ -3205,6 +3315,21 @@ export async function runDropperStage(
             mergedProposals.push(id);
           }
         }
+        const p = runtime.consolidationProgress;
+        if (p && p.stage === "dropper") {
+          p.promptsCompleted += 1;
+          const remainingBatches = queue.filter((b) => b.length > 0);
+          p.stagePromptsRemaining = remainingBatches.length;
+          p.stagePromptsTotal = Math.max(p.stagePromptsTotal, batchRuns + remainingBatches.length);
+          p.backlogItems = remainingBatches.reduce((sum, b) => sum + b.length, 0);
+          p.backlogTokens = Math.min(
+            p.stageInitialTokens,
+            remainingBatches.reduce(
+              (sum, b) => sum + b.reduce((bs, o) => bs + observationRenderedTokens(o), 0),
+              0,
+            ),
+          );
+        }
       } catch (error) {
         if (!runtime.isGenerationActive(generation)) return "abort";
         if (isStaleExtensionContextError(error)) {
@@ -3223,6 +3348,12 @@ export async function runDropperStage(
         ) {
           const mid = Math.max(1, Math.floor(batch.length / 2));
           queue.unshift(batch.slice(0, mid), batch.slice(mid));
+          const p = runtime.consolidationProgress;
+          if (p && p.stage === "dropper") {
+            const remainingBatches = queue.filter((b) => b.length > 0);
+            p.stagePromptsRemaining = remainingBatches.length;
+            p.stagePromptsTotal = Math.max(p.stagePromptsTotal, batchRuns + remainingBatches.length);
+          }
           debugLog("dropper.batch_split", {
             batchCandidateCount: batch.length,
             model: `${bestModel.provider}/${bestModel.id}`,
@@ -3239,10 +3370,24 @@ export async function runDropperStage(
       input.reflectionsForDropper,
       Math.max(0, poolTokens - dropTargetTokens(runtime.config.observationsPoolMaxTokens, runtime.config.observationsPoolTargetTokens)),
     );
-    return commitDropperResult(selected.length > 0 ? attachDropEvidence(selected, mergedProofs) : undefined);
+    return commitDropperResult(
+      selected.length > 0 ? attachDropEvidence(selected, mergedProofs) : undefined,
+      true,
+    );
   };
 
   if (globalMaxDrops <= 0) return commitDropperResult(undefined);
+  runtime.consolidationProgress = {
+    promptsCompleted: runtime.consolidationProgress?.promptsCompleted ?? 0,
+    stage: "dropper",
+    stagePromptsRemaining: 1,
+    stagePromptsTotal: 1,
+    backlogTokens: input.dropperNewObsTokens,
+    stageInitialTokens: input.dropperNewObsTokens,
+    backlogItems: input.eligibleObservations.length,
+    stageInitialItems: input.eligibleObservations.length,
+    backlogItemUnit: "candidates",
+  };
 
   // Largest-window model resolved so far (shrink target) and whether any
   // attempt ran a model and failed (which keeps error semantics owning the

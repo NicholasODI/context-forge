@@ -13,6 +13,8 @@ import {
 } from "./consolidation.ts";
 import { registerCompactionTrigger } from "./compaction-trigger.ts";
 import { runPreCompactionConsolidationWithUI } from "./pre-compact-overlay.ts";
+import { OBSERVER_SYSTEM } from "./agents/observer/prompts.ts";
+import { RecordObservationsSchema } from "./agents/observer/tool-schema.ts";
 import { registerMemoryCommand } from "../commands/memory.ts";
 import { registerBeforeCompactHook, PI_VCC_COMPACT_INSTRUCTION } from "../hooks/before-compact.ts";
 import type { ConsolidateBeforeCompactionMode } from "../core/unified-config.ts";
@@ -768,5 +770,134 @@ describe("pre-compaction full consolidation & separate consolidator model", () =
       thinking: "low",
     });
     expect(runtime.config.consolidateBeforeCompaction).toBe("off");
+  });
+
+  it("instructs observer to pass observations directly as an array, not a JSON string", () => {
+    expect(OBSERVER_SYSTEM).toContain(
+      "Pass the observations as an array directly, not as a JSON string.",
+    );
+    const observationsProp = (RecordObservationsSchema as any).properties?.observations;
+    expect(observationsProp?.description).toContain(
+      "Pass the observations as an array directly, not as a JSON string.",
+    );
+  });
+
+  it("updates pre-compaction overlay backlog for reflector and dropper stages and renders token-based progress bar", async () => {
+    const h = makeHarness({
+      consolidateBeforeCompaction: "only",
+      consolidatorModel: {
+        provider: consolidatorModel.provider,
+        id: consolidatorModel.id,
+      },
+    });
+    h.entries.length = 0;
+    for (let i = 1; i <= 4; i++) {
+      const body = `Stage progress chunk ${i}: ` + `evidence_${i} `.repeat(100);
+      h.entries.push({
+        type: "message",
+        id: `ov-${i}`,
+        message: {
+          role: i % 2 === 1 ? "user" : "assistant",
+          content: i % 2 === 1 ? body : [{ type: "text", text: body }],
+          timestamp: i,
+        },
+      });
+    }
+    h.runtime.applyLoadedConfig({
+      ...h.runtime.config,
+      observeAfterTokens: 999_999,
+      reflectAfterTokens: 999_999,
+      observerChunkMaxTokens: 220,
+      observationsPoolMaxTokens: 60,
+      observationsPoolTargetTokens: 10,
+      consolidateBeforeCompaction: "only",
+    });
+
+    const mockTheme = {
+      fg: (_token: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    let overlayComponent: { render(width: number): string[] } | undefined;
+    const snapshots: Array<{ stage: string; text: string; percent: number; tokensLeft: number }> = [];
+
+    const captureSnapshot = (stage: string) => {
+      if (!overlayComponent) return;
+      const text = overlayComponent.render(80).join("\n");
+      const match = text.match(/Progress:\s+\[[^\]]+\]\s+(\d+)%\s+\(~([\d,.\u00a0]+)\s+tokens left\)/);
+      snapshots.push({
+        stage,
+        text,
+        percent: match ? Number(match[1]) : -1,
+        tokensLeft: match ? Number(match[2]!.replace(/\D/g, "")) : -1,
+      });
+    };
+
+    const baseStream = h.ctx.modelRegistry.streamSimple;
+    h.ctx.modelRegistry.streamSimple = vi.fn((calledModel: any, context: any) => {
+      const stage = h.runtime.consolidationPhase ?? "unknown";
+      captureSnapshot(stage);
+      if (stage === "observer") {
+        const userMsg = context.messages.findLast((m: any) => m.role === "user");
+        const body =
+          typeof userMsg.content === "string"
+            ? userMsg.content
+            : userMsg.content.map((b: any) => b.text ?? "").join("\n");
+        const ids = [...body.matchAll(/\[Source entry id: ([^\]]+)\]/g)].map((m) => m[1]);
+        return toolResponse(calledModel, "record_observations", {
+          complete: true,
+          observations: ids.map((id) => ({
+            content: `Durable finding from ${id} with verified technical evidence`,
+            relevance: "medium",
+            sourceEntryIds: [id],
+          })),
+        });
+      }
+      return baseStream(calledModel, context);
+    });
+
+    h.ctx.hasUI = true;
+    h.ctx.ui = {
+      notify: vi.fn(),
+      setWorkingMessage: vi.fn(),
+      custom: vi.fn(async (factory: any) => {
+        return await new Promise((resolve) => {
+          overlayComponent = factory({ requestRender: vi.fn() }, mockTheme, {}, resolve);
+        });
+      }),
+    };
+
+    const res = await runPreCompactionConsolidationWithUI(h.pi, h.runtime, h.ctx);
+    expect(res).toEqual({ outcome: "ran" });
+
+    const observerSnaps = snapshots.filter((s) => s.stage === "observer");
+    const reflectorSnap = snapshots.find((s) => s.stage === "reflector");
+    const dropperSnap = snapshots.find((s) => s.stage === "dropper");
+
+    expect(observerSnaps.length).toBeGreaterThanOrEqual(2);
+    expect(reflectorSnap).toBeDefined();
+    expect(dropperSnap).toBeDefined();
+
+    // Every stage renders the token-based progress bar
+    for (const snap of [observerSnaps[0]!, observerSnaps.at(-1)!, reflectorSnap!, dropperSnap!]) {
+      expect(snap.text, `stage=${snap.stage}`).toMatch(
+        /Progress:\s+\[[█░]+\]\s+\d+%\s+\(~[\d,.\u00a0]+\s+tokens left\)/,
+      );
+      expect(snap.percent, `stage=${snap.stage}\n${snap.text}`).toBeGreaterThanOrEqual(0);
+      expect(snap.tokensLeft, `stage=${snap.stage}\n${snap.text}`).toBeGreaterThan(0);
+    }
+
+    // Observer progress percentage advances and tokens left decreases across chunks
+    expect(observerSnaps[0]!.percent).toBe(0);
+    expect(observerSnaps.at(-1)!.percent).toBeGreaterThan(observerSnaps[0]!.percent);
+    expect(observerSnaps.at(-1)!.tokensLeft).toBeLessThan(observerSnaps[0]!.tokensLeft);
+
+    // Reflector stage displays live Reflector observation backlog (NOT Observer's ~0 tokens left)
+    expect(reflectorSnap!.text).toContain("Reflector (synthesizing reflections)");
+    expect(reflectorSnap!.text).toMatch(/Backlog:\s+[1-9]\d*\s+observations\s+\(~[1-9][\d,.\u00a0]* tokens\)/);
+    expect(reflectorSnap!.text).not.toContain("~0 tokens left");
+
+    // Dropper stage displays live Dropper candidate backlog
+    expect(dropperSnap!.text).toContain("Dropper (pruning superseded observations)");
+    expect(dropperSnap!.text).toMatch(/Backlog:\s+[1-9]\d*\s+candidates\s+\(~[1-9][\d,.\u00a0]* tokens\)/);
   });
 });

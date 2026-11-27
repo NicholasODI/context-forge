@@ -62,6 +62,28 @@ type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
 export type ConsolidationPhase = "observer" | "reflector" | "dropper";
 
+/** Live per-stage backlog and prompt progress for the active consolidation run. */
+export interface ConsolidationProgress {
+  /** Number of stage prompts/batches completed so far across this run. */
+  promptsCompleted: number;
+  /** Currently active consolidation stage. */
+  stage: ConsolidationPhase | undefined;
+  /** Remaining prompts in the current stage (including the in-flight prompt). */
+  stagePromptsRemaining: number;
+  /** Total prompts planned/estimated for the current stage. */
+  stagePromptsTotal: number;
+  /** Remaining backlog tokens for the current stage. */
+  backlogTokens: number;
+  /** Initial backlog tokens for the current stage. */
+  stageInitialTokens: number;
+  /** Remaining item count for reflector/dropper (observations or candidates). */
+  backlogItems?: number;
+  /** Initial item count for reflector/dropper. */
+  stageInitialItems?: number;
+  /** Human-readable unit for backlogItems ("observations" | "reflections" | "candidates"). */
+  backlogItemUnit?: "observations" | "reflections" | "candidates";
+}
+
 /** Captures the extension/session generation that owns a unit of deferred work. */
 export interface RuntimeGeneration {
   readonly generation: number;
@@ -205,6 +227,8 @@ export class Runtime {
    *  await this so no outgoing request or compaction races ahead of consolidation. */
   preCompactionConsolidationPromise: Promise<void> | null = null;
   consolidationPhase: ConsolidationPhase | undefined;
+  /** Live backlog and prompt progress snapshot for the current consolidation run. */
+  consolidationProgress: ConsolidationProgress | undefined;
   /**
    * Models that failed in the current consolidation stage (in-memory only).
    * Used when cooldownHours is 0 — avoids disk writes while still letting
@@ -1192,6 +1216,7 @@ export class Runtime {
   launchConsolidationTask(ctx: LaunchCtx, work: () => Promise<void>): Promise<void> {
     this.consolidationInFlight = true;
     this.consolidationPhase = undefined;
+    this.consolidationProgress = undefined;
     const promise = this.launchTrackedTask(ctx, "consolidation", async () => {
       try { await work(); }
       finally {
@@ -1201,6 +1226,7 @@ export class Runtime {
     }, () => {
       this.consolidationInFlight = false;
       this.consolidationPhase = undefined;
+      this.consolidationProgress = undefined;
       if (this.consolidationPromise === promise) this.consolidationPromise = null;
     });
     this.consolidationPromise = promise;

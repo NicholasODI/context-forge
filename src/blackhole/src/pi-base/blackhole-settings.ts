@@ -273,6 +273,7 @@ export const config = new ConfigManager<UnifiedConfig>({
       step: 0.01,
     },
     numericField("agentMaxTurns", cfg),
+    numericField("workerOutputMaxTokens", cfg),
     numericField("providerIdleTimeoutMs", cfg),
     {
       key: "cacheRetention",

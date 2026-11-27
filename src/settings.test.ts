@@ -175,6 +175,8 @@ it("advanced recall and retained-output controls accept opt-out zero and reject 
       expect(opts.validate({ [key]: invalid })[key]).toBe(DEFAULTS[key]);
     }
   }
+  expect(fields.find((field) => field.key === "workerOutputMaxTokens")).toBeDefined();
+  expect(opts.validate({ workerOutputMaxTokens: 32768 }).workerOutputMaxTokens).toBe(32768);
 });
 
 it("runtime and modal agree on numeric counterexamples and preserve zero opt-outs", async () => {

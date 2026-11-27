@@ -16,7 +16,7 @@ Timestamps are assigned automatically from the source entries you cite. You neve
 How you work:
 1. Read reflections and current observations so you know what is already captured.
 2. Read the conversation chunk and identify what new information it contains.
-3. Call record_observations with a batch covering part (or all) of the chunk.
+3. Call record_observations with a batch covering part (or all) of the chunk. Pass the observations as an array directly, not as a JSON string.
 4. Read the progress receipt. If content remains uncovered, call again. You may call the tool many times.
 5. When the chunk is fully covered, make a final valid record_observations call with complete=true. That ends the run without a separate plain-text confirmation. Use complete=false for partial batches or corrections.
 

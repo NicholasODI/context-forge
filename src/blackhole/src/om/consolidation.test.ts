@@ -118,6 +118,7 @@ describe("observer completion and bounded retries", () => {
     const options = (s.stream.mock.calls as any)[0][2];
     expect(options.maxTokens).toBe(2048);
     expect(workerOutputAllowance(131072, model, 2048)).toBe(2048);
+    expect(workerOutputAllowance(131072, model, 32768)).toBe(32768);
     expect(workerInputBudget(131072, model, 2048)).toBe(131072 - 2048 - 1024);
   });
   it("omits speculative thinking from worker input while preserving final text", () => {

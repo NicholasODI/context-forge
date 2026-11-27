@@ -121,6 +121,16 @@ export const NUMERIC_FIELDS = [
     step: 1,
   },
   {
+    key: "workerOutputMaxTokens",
+    type: "number",
+    label: "Worker output max",
+    description:
+      "Max output tokens per background memory worker call (clamped to model limit and 25% of context window)",
+    min: 1_024,
+    max: 32_768,
+    step: 1_024,
+  },
+  {
     key: "providerIdleTimeoutMs",
     type: "number",
     label: "Provider idle timeout (ms)",
@@ -131,13 +141,10 @@ export const NUMERIC_FIELDS = [
     step: 1000,
   },
 ] as const;
-export type NumericKey =
-  | (typeof NUMERIC_FIELDS)[number]["key"]
-  | "workerOutputMaxTokens";
-export const NUMERIC_KEYS: readonly NumericKey[] = [
-  ...NUMERIC_FIELDS.map((field) => field.key),
-  "workerOutputMaxTokens",
-];
+export type NumericKey = (typeof NUMERIC_FIELDS)[number]["key"];
+export const NUMERIC_KEYS: readonly NumericKey[] = NUMERIC_FIELDS.map(
+  (field) => field.key,
+);
 const ZERO_ALLOWED = new Set<string>([
   "retainedToolOutputMaxTokens",
   "recallResponseMaxChars",

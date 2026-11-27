@@ -51,6 +51,8 @@ const PROGRESS_OVERLAY_OPTIONS: OverlayOptions = {
   anchor: "center",
 };
 
+const PROGRESS_BAR_WIDTH = 20;
+
 function formatElapsed(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
   const min = Math.floor(totalSec / 60);
@@ -87,6 +89,106 @@ function safeRemainingTokens(runtime: Runtime, ctx: ConsolidationCtx): number | 
   } catch {
     return undefined;
   }
+}
+
+export interface OverlayTokenProgress {
+  readonly processedTokens: number;
+  readonly remainingTokens: number;
+  readonly totalTokens: number;
+  readonly percent: number;
+}
+
+/**
+ * Compute token-based progress for the active consolidation stage
+ * (Observer → Reflector → Dropper) from tokens left vs. stage initial tokens.
+ */
+export function computeOverlayTokenProgress(
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  initialObserverTokens: number | undefined,
+): OverlayTokenProgress {
+  const progress = runtime.consolidationProgress;
+  const activeStage = progress?.stage ?? runtime.consolidationPhase;
+
+  if ((activeStage === "reflector" || activeStage === "dropper") && progress) {
+    const remainingTokens = Math.max(0, progress.backlogTokens);
+    const totalTokens = Math.max(progress.stageInitialTokens, remainingTokens);
+    const processedTokens = Math.max(0, totalTokens - remainingTokens);
+    const percent =
+      totalTokens > 0
+        ? Math.min(100, Math.max(0, Math.round((processedTokens / totalTokens) * 100)))
+        : 100;
+    return { processedTokens, remainingTokens, totalTokens, percent };
+  }
+
+  const remainingTokens = Math.max(
+    0,
+    safeRemainingTokens(runtime, ctx) ?? progress?.backlogTokens ?? initialObserverTokens ?? 0,
+  );
+  const totalTokens = Math.max(
+    initialObserverTokens ?? 0,
+    progress?.stageInitialTokens ?? 0,
+    remainingTokens,
+  );
+  const processedTokens = Math.max(0, totalTokens - remainingTokens);
+  const percent =
+    totalTokens > 0
+      ? Math.min(100, Math.max(0, Math.round((processedTokens / totalTokens) * 100)))
+      : 100;
+  return { processedTokens, remainingTokens, totalTokens, percent };
+}
+
+function renderProgressBar(
+  progress: OverlayTokenProgress,
+  theme: Theme,
+  barWidth = PROGRESS_BAR_WIDTH,
+): string {
+  const filled = Math.min(barWidth, Math.max(0, Math.round((progress.percent / 100) * barWidth)));
+  const empty = Math.max(0, barWidth - filled);
+  const bar =
+    theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(empty));
+  const tokenNote = `~${progress.remainingTokens.toLocaleString()} tokens left`;
+  return `[${bar}] ${progress.percent}% (${tokenNote})`;
+}
+
+export function formatStageBacklog(
+  runtime: Runtime,
+  ctx: ConsolidationCtx,
+  initialObserverTokens: number | undefined,
+): string {
+  const progress = runtime.consolidationProgress;
+  const activeStage = progress?.stage ?? runtime.consolidationPhase;
+
+  if ((activeStage === "reflector" || activeStage === "dropper") && progress) {
+    const unit =
+      progress.backlogItemUnit ?? (activeStage === "reflector" ? "observations" : "candidates");
+    const items = progress.backlogItems ?? 0;
+    const initialItems = progress.stageInitialItems;
+    const itemText =
+      initialItems !== undefined && initialItems > items
+        ? `${items.toLocaleString()}/${initialItems.toLocaleString()} ${unit}`
+        : `${items.toLocaleString()} ${unit}`;
+    const tokText =
+      progress.stageInitialTokens > progress.backlogTokens
+        ? `~${progress.backlogTokens.toLocaleString()} / ~${progress.stageInitialTokens.toLocaleString()} tokens`
+        : `~${progress.backlogTokens.toLocaleString()} tokens`;
+    const batchSuffix =
+      progress.stagePromptsTotal > 1
+        ? ` · batch ${Math.min(
+            progress.stagePromptsTotal,
+            progress.stagePromptsTotal - progress.stagePromptsRemaining + 1,
+          )}/${progress.stagePromptsTotal}`
+        : "";
+    return `${itemText} (${tokText})${batchSuffix}`;
+  }
+
+  const remaining = safeRemainingTokens(runtime, ctx) ?? progress?.backlogTokens;
+  if (remaining === undefined) return "calculating...";
+  const baseline = initialObserverTokens ?? progress?.stageInitialTokens;
+  if (baseline !== undefined && baseline > remaining) {
+    return `~${remaining.toLocaleString()} tokens left (from ~${baseline.toLocaleString()})`;
+  }
+  return `~${remaining.toLocaleString()} tokens remaining`;
 }
 
 /**
@@ -159,22 +261,19 @@ export async function runPreCompactionConsolidationWithUI(
             const top = border(`┌${"─".repeat(Math.max(1, width - 2))}┐`);
             const bottom = border(`└${"─".repeat(Math.max(1, width - 2))}┘`);
 
-            const remaining = safeRemainingTokens(runtime, ctx);
-            const remainingText =
-              remaining !== undefined
-                ? initialRemaining !== undefined && initialRemaining > remaining
-                  ? `~${remaining.toLocaleString()} tokens left (from ~${initialRemaining.toLocaleString()})`
-                  : `~${remaining.toLocaleString()} tokens remaining`
-                : "calculating...";
+            const backlogText = formatStageBacklog(runtime, ctx, initialRemaining);
+            const tokenProgress = computeOverlayTokenProgress(runtime, ctx, initialRemaining);
+            const progressBarText = renderProgressBar(tokenProgress, theme);
 
             return [
               top,
               pad(theme.bold(theme.fg("accent", "Context Forge — Consolidating Before Compaction"))),
               pad(""),
-              pad(`${theme.fg("muted", "Stage:  ")} ${theme.fg("text", phaseLabel(runtime.consolidationPhase))}`),
-              pad(`${theme.fg("muted", "Model:  ")} ${theme.fg("text", modelLabel(runtime, ctx))}`),
-              pad(`${theme.fg("muted", "Backlog:")} ${theme.fg("text", remainingText)}`),
-              pad(`${theme.fg("muted", "Elapsed:")} ${theme.fg("text", formatElapsed(Date.now() - startedAt))}`),
+              pad(`${theme.fg("muted", "Stage:   ")} ${theme.fg("text", phaseLabel(runtime.consolidationPhase))}`),
+              pad(`${theme.fg("muted", "Model:   ")} ${theme.fg("text", modelLabel(runtime, ctx))}`),
+              pad(`${theme.fg("muted", "Backlog: ")} ${theme.fg("text", backlogText)}`),
+              pad(`${theme.fg("muted", "Progress:")} ${theme.fg("text", progressBarText)}`),
+              pad(`${theme.fg("muted", "Elapsed: ")} ${theme.fg("text", formatElapsed(Date.now() - startedAt))}`),
               pad(""),
               pad(theme.fg("dim", "Compaction will continue automatically once all tokens finish. Press Esc to skip.")),
               bottom,

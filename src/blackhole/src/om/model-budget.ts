@@ -6,7 +6,7 @@ import {
   type OmModelConfig,
 } from "../core/unified-config.js";
 
-export const AGENT_LOOP_MAX_TOKENS = 32_000;
+export const AGENT_LOOP_MAX_TOKENS = 32_768;
 
 export interface CompactThresholdConfig {
   compactAfterTokens?: number;

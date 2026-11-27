@@ -22,8 +22,8 @@ export const RecordObservationsSchema = {
     observations: {
       type: "array",
       description:
-        "Batch of new observations. May be empty only alongside complete=true, " +
-        "which closes a run that found nothing new.",
+        "Batch of new observations. Pass the observations as an array directly, not as a JSON string. " +
+        "May be empty only alongside complete=true, which closes a run that found nothing new.",
       items: {
         type: "object",
         required: ["content", "relevance", "sourceEntryIds"],
